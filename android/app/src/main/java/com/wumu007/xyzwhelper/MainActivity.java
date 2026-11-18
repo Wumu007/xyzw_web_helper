@@ -21,7 +21,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.ProgressBar;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -253,30 +252,25 @@ public class MainActivity extends AppCompatActivity {
      */
     private void highlightBinUploadArea() {
         final int[] attempts = {0};
-        Runnable task = new Runnable() {
-            @Override
-            public void run() {
-                attempts[0]++;
-                webView.evaluateJavascript(
-                        "(function(){"
-                                + "var i=document.querySelector('input[type=file]');"
-                                + "if(!i){return 'wait';}"
-                                + "var t=i.closest('.ant-upload')||i.parentElement||i;"
-                                + "t.style.outline='3px solid #007AFF';"
-                                + "t.style.outlineOffset='2px';"
-                                + "t.style.borderRadius='12px';"
-                                + "try{t.scrollIntoView({block:'center',behavior:'smooth'});}catch(e){}"
-                                + "return 'ok';"
-                                + "})()",
-                        value -> {
-                            if (value != null && value.contains("wait")
-                                    && attempts[0] < 6) {
-                                mainHandler.postDelayed(this, 700);
-                            }
-                        });
-            }
-        };
-        mainHandler.postDelayed(task, 500);
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = () -> webView.evaluateJavascript(
+                "(function(){"
+                        + "var i=document.querySelector('input[type=file]');"
+                        + "if(!i){return 'wait';}"
+                        + "var t=i.closest('.ant-upload')||i.parentElement||i;"
+                        + "t.style.outline='3px solid #007AFF';"
+                        + "t.style.outlineOffset='2px';"
+                        + "t.style.borderRadius='12px';"
+                        + "try{t.scrollIntoView({block:'center',behavior:'smooth'});}catch(e){}"
+                        + "return 'ok';"
+                        + "})()",
+                value -> {
+                    if (value != null && value.contains("wait") && attempts[0] < 6) {
+                        attempts[0]++;
+                        mainHandler.postDelayed(poll[0], 700);
+                    }
+                });
+        mainHandler.postDelayed(poll[0], 500);
     }
 
     // ------------------------------------------------------------------
