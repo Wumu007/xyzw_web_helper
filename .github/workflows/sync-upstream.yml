@@ -1,0 +1,64 @@
+name: Auto Sync Upstream
+
+# 定时 + 手动触发：自动检测上游 w1249178256/xyzw_web_helper 的更新并同步到本仓库 main。
+# 机制说明见 .github/AUTO_SYNC.md 与 scripts/sync-upstream.sh 头部注释。
+
+on:
+  schedule:
+    - cron: '23 */6 * * *' # 每 6 小时一次（错开整点高峰）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅检测差异，不做任何写入'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # 推送同步结果到本仓库
+  pull-requests: write   # 冲突时创建/更新 PR
+  issues: write          # 同步失败时创建跟踪 Issue
+
+concurrency:
+  group: auto-sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout（完整历史，用于差异计算）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 执行上游同步
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+          UPSTREAM_REPO: w1249178256/xyzw_web_helper
+          UPSTREAM_BRANCH: main
+        run: bash scripts/sync-upstream.sh
+
+      - name: 上传同步日志（Artifact，保留 90 天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-upstream-log
+          path: sync.log
+          retention-days: 90
+
+      - name: 失败时创建/更新跟踪 Issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create auto-sync --color d93f0b 2>/dev/null || true
+          BODY="自动同步工作流执行失败，请查看运行日志：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          EXISTING="$(gh issue list --label auto-sync --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "⚠️ 上游自动同步失败" --body "$BODY" --label auto-sync
+          fi

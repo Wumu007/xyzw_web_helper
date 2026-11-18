@@ -1,0 +1,8 @@
+{
+  "upstream_repo": "w1249178256/xyzw_web_helper",
+  "upstream_branch": "main",
+  "target_branch": "main",
+  "work_branch": "sync/auto-upstream",
+  "auto_pr_on_conflict": true,
+  "max_retry": 3
+}
