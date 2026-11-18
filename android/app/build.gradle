@@ -27,5 +27,7 @@ android {
 }
 
 dependencies {
+    // 对齐 Kotlin stdlib 版本，避免 appcompat 依赖链带来的 jdk7/jdk8 重复类问题
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
     implementation 'androidx.appcompat:appcompat:1.7.0'
 }
