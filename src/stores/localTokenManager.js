@@ -1,13 +1,13 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { computed, ref } from "vue";
 import {
-  getUserToken as dbGetUserToken,
-  setUserToken as dbSetUserToken,
-  clearUserToken as dbClearUserToken,
-  getAllGameTokens as dbGetAllGameTokens,
-  putGameToken as dbPutGameToken,
-  deleteGameToken as dbDeleteGameToken,
   clearGameTokens as dbClearGameTokens,
+  clearUserToken as dbClearUserToken,
+  deleteGameToken as dbDeleteGameToken,
+  getAllGameTokens as dbGetAllGameTokens,
+  getUserToken as dbGetUserToken,
+  putGameToken as dbPutGameToken,
+  setUserToken as dbSetUserToken,
   migrateFromLocalStorageIfNeeded,
 } from "@/utils/tokenDb";
 
@@ -183,7 +183,7 @@ export const useLocalTokenStore = defineStore("localToken", () => {
         }
       };
 
-      wsAgent.onClose = (event) => {
+      wsAgent.onClose = () => {
         // 降噪
         if (wsConnections.value[roleId]) {
           wsConnections.value[roleId].status = "disconnected";
@@ -237,7 +237,7 @@ export const useLocalTokenStore = defineStore("localToken", () => {
 
   // 处理游戏消息
   const handleGameMessage = (roleId, message) => {
-    const { cmd, body } = message;
+    const { cmd } = message;
 
     switch (cmd) {
       case "role_getroleinfo":
@@ -343,7 +343,7 @@ export const useLocalTokenStore = defineStore("localToken", () => {
         // 降噪
         return response;
       } else {
-        throw new Error(`未知的游戏命令: ${commandName}`);
+        throw new TypeError(`未知的游戏命令: ${commandName}`);
       }
     } catch (error) {
       console.error(`发送游戏命令失败 [${roleId}] ${commandName}:`, error);
@@ -413,8 +413,16 @@ export const useLocalTokenStore = defineStore("localToken", () => {
     let cleanedCount = 0;
 
     Object.entries(gameTokens.value).forEach(([roleId, tokenData]) => {
+      // 与 tokenStore 保持一致：长期有效的 token（BIN/扫码/手机号/URL 导入
+      // 或已升级）不参与 24 小时过期清理，避免恢复备份后账号被立即删除。
+      const isPermanent =
+        tokenData?.upgradedToPermanent === true ||
+        ["url", "bin", "wxQrcode", "mobile", "wxForceLogout"].includes(
+          tokenData?.importMethod,
+        );
+
       const lastUsed = new Date(tokenData.lastUsed || tokenData.createdAt);
-      if (lastUsed > oneDayAgo) {
+      if (isPermanent || lastUsed > oneDayAgo) {
         cleanedTokens[roleId] = tokenData;
       } else {
         cleanedCount++;

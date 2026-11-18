@@ -123,7 +123,7 @@
           <div class="security-item">
             <div class="security-info">
               <h3>数据导出</h3>
-              <p>导出您的所有数据</p>
+              <p>导出全部账号 Token、BIN 登录凭据及所有本地配置</p>
             </div>
             <n-button @click="exportData"> 导出 </n-button>
           </div>
@@ -142,12 +142,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from "vue";
+import { useDialog, useMessage } from "naive-ui";
+import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
-import { useMessage, useDialog } from "naive-ui";
 import { useAuthStore } from "@/stores/auth";
+import { collectFullBackup, downloadBackupFile } from "@/utils/fullBackup";
 
-const router = useRouter();
+useRouter();
 const message = useMessage();
 const dialog = useDialog();
 const authStore = useAuthStore();
@@ -178,23 +179,6 @@ const preferences = reactive({
 });
 
 // 密码验证规则
-const passwordRules = {
-  currentPassword: [
-    { required: true, message: "请输入当前密码", trigger: "blur" },
-  ],
-  newPassword: [
-    { required: true, message: "请输入新密码", trigger: "blur" },
-    { min: 6, message: "密码长度不能少于6位", trigger: "blur" },
-  ],
-  confirmPassword: [
-    { required: true, message: "请确认新密码", trigger: "blur" },
-    {
-      validator: (rule, value) => value === passwordForm.newPassword,
-      message: "两次输入的密码不一致",
-      trigger: "blur",
-    },
-  ],
-};
 
 // 选项数据
 const themeOptions = [
@@ -236,12 +220,6 @@ const changePassword = async () => {
   }
 };
 
-const savePreferences = () => {
-  // 保存偏好设置
-  localStorage.setItem("userPreferences", JSON.stringify(preferences));
-  message.success("偏好设置保存成功");
-};
-
 const updateTheme = (theme) => {
   preferences.theme = theme;
   localStorage.setItem("theme", theme);
@@ -259,10 +237,6 @@ const updateTheme = (theme) => {
   }
 };
 
-const changeAvatar = () => {
-  message.info("头像更换功能开发中...");
-};
-
 const setupTwoFactor = () => {
   message.info("两步验证设置功能开发中...");
 };
@@ -271,8 +245,21 @@ const viewLoginHistory = () => {
   message.info("登录历史查看功能开发中...");
 };
 
-const exportData = () => {
-  message.info("数据导出功能开发中...");
+// Export a full backup (localStorage config + IndexedDB incl. BIN credentials).
+const exportData = async () => {
+  try {
+    const backup = await collectFullBackup();
+    const accountCount =
+      backup.indexedDB?.xyzw_token_db?.gameTokens?.length ?? 0;
+    const binCount = backup.indexedDB?.xyzw?.tokens?.length ?? 0;
+    downloadBackupFile(backup);
+    message.success(
+      `备份已下载：账号记录 ${accountCount} 条，BIN 凭据 ${binCount} 份`,
+    );
+  } catch (error) {
+    console.error("导出失败:", error);
+    message.error(`导出失败：${error.message}`);
+  }
 };
 
 const deleteAccount = () => {
