@@ -31,8 +31,23 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK (shell, 不依赖第三方 action)
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          mkdir -p "$SDK/cmdline-tools"
+          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "下载 Android 命令行工具..."
+            curl -sSL -o /tmp/clt.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q -o /tmp/clt.zip -d "$SDK/cmdline-tools"
+            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          fi
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          echo "Android SDK 就绪：$SDK"
 
       - name: Build debug APK
         run: |
@@ -49,11 +64,14 @@ jobs:
       - name: Commit build log for diagnosis
         if: failure()
         run: |
-          tail -n 400 build-output.log > build-error.log || echo "no log captured" > build-error.log
+          if [ -f build-output.log ]; then
+            tail -n 400 build-output.log > build-error.log
+          else
+            echo "build-output.log 不存在（构建步骤未执行或提前失败）" > build-error.log
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin ci-logs || true
-          git checkout -B ci-logs origin/ci-logs 2>/dev/null || git checkout -B ci-logs
-          git add build-error.log
-          git commit -m "ci: 记录 APK 构建失败日志"
+          git checkout -B ci-logs
+          git add -f build-error.log
+          git commit -m "ci: APK 构建失败日志" || true
           git push origin ci-logs --force
