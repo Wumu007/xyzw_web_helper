@@ -28,10 +28,11 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 /**
- * 咸鱼之王助手 - 安卓壳应用
+ * 快乐咸鱼 - 安卓壳应用
  *
  * 架构：WebView 加载线上网页版（同源复用全部处理流程），原生层提供：
- *  1. 启动引导：无 Token 时自动弹出「导入 BIN 文件」引导卡片
+ *  1. 启动引导：通过密钥验证且无 Token 时才弹出「导入 BIN 文件」引导卡片
+ *     （保证进入应用时首个弹窗是网页内的密钥验证界面）
  *  2. 文件选择桥接：网页版 BIN 上传组件 ↔ 系统文件选择器（SAF）
  *  3. 底部一键执行快捷栏：日常任务 / 批量日常 / 游戏功能 / 备份恢复
  *  4. 加载进度条、主框架错误重试、备份文件下载（DownloadManager）
@@ -138,10 +139,20 @@ public class MainActivity extends AppCompatActivity {
                 boolean looksLikeNoToken =
                         "/".equals(path) || "/tokens".equals(path);
 
-                // 冷启动且落在首页/Token页 → 说明本地无 Token，弹出导入引导
+                // 冷启动且落在首页/Token页：先检查网页内密钥门禁是否已通过
+                // （localStorage 有 xyzw_access_record 才算通过），只有通过后
+                // 且本地无 Token 才弹原生导入引导——保证首个弹窗是密钥验证界面
                 if (!onboardingShownThisSession && looksLikeNoToken) {
                     onboardingShownThisSession = true;
-                    onboardingOverlay.setVisibility(View.VISIBLE);
+                    final WebView wv = view;
+                    wv.evaluateJavascript(
+                            "(function(){try{return localStorage.getItem('xyzw_access_record')?'1':'0';}catch(e){return '0';}})()",
+                            value -> {
+                                if (value != null && value.contains("1")
+                                        && !isFinishing()) {
+                                    onboardingOverlay.setVisibility(View.VISIBLE);
+                                }
+                            });
                 }
 
                 if (pendingBinHighlight) {

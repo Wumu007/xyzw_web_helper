@@ -116,6 +116,10 @@
         </div>
       </div>
     </nav>
+
+    <!-- 密钥状态条：卡密类型 + 剩余时间倒计时（终身卡显示"终身卡"） -->
+    <KeyStatusBar />
+
     <n-drawer
       v-model:show="isMobileMenuOpen"
       placement="left"
@@ -249,6 +253,7 @@ import { useMessage } from "naive-ui";
 import { ref } from "vue";
 
 import { useRouter } from "vue-router";
+import KeyStatusBar from "@/components/Common/KeyStatusBar.vue";
 import ThemeToggle from "@/components/Common/ThemeToggle.vue";
 import { selectedToken, useTokenStore } from "@/stores/tokenStore";
 import { isNowInLegionWarTime } from "@/utils/clubBattleUtils";

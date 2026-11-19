@@ -31,20 +31,23 @@
 
 <script setup>
 /**
- * 访问密钥门禁（软门禁）
+ * 访问密钥门禁
  *
  * 规则：
- *  - 密钥清单在 src/config/access-keys.json，仓库只存 SHA-256 哈希与有效期，明文不公开
- *  - 验证通过后记录到 localStorage，每次启动重新校验有效期，过期自动回到验证页
- *  - access-keys.json 为空数组时门禁自动关闭（逃生开关）
- *  - 前端门禁能挡住普通访客；如需对抗懂技术的访问，请叠加 Cloudflare Access
+ *  - 首次进入必须先通过密钥验证（全屏置顶弹窗，首个弹窗）
+ *  - 密钥有效期内不弹窗；过期后再次进入自动弹窗
+ *  - 一密一机：优先调用 /api/verify-key（Cloudflare KV 绑定 deviceId），
+ *    已绑定其他设备的密钥会被拒绝；接口不可用时降级为本地验证
+ *  - 密钥清单：src/config/access-keys.json（只存哈希），为空时门禁自动关闭
  */
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { useMessage } from "naive-ui";
 
 import ACCESS_KEYS from "@/config/access-keys.json";
 
 const STORAGE_KEY = "xyzw_access_record";
+const DEVICE_KEY = "xyzw_device_id";
+const VERIFY_API = "/api/verify-key";
 
 const locked = ref(true);
 const keyInput = ref("");
@@ -62,6 +65,20 @@ async function sha256Hex(text) {
     .join("");
 }
 
+function getDeviceId() {
+  let id = localStorage.getItem(DEVICE_KEY);
+  if (!id) {
+    id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : "d" +
+          Math.random().toString(36).slice(2) +
+          Date.now().toString(36);
+    localStorage.setItem(DEVICE_KEY, id);
+  }
+  return id;
+}
+
 function findEntryByHash(hash) {
   return ACCESS_KEYS.find((k) => k.hash === hash) || null;
 }
@@ -72,14 +89,10 @@ function isExpired(entry) {
   );
 }
 
-function persist(entry, hash) {
+function persist(hash, type, expiresAt) {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({
-      hash,
-      type: entry.type,
-      expiresAt: entry.expiresAt || null,
-    }),
+    JSON.stringify({ hash, type, expiresAt: expiresAt || null }),
   );
 }
 
@@ -93,7 +106,7 @@ async function checkStored() {
   try {
     const rec = JSON.parse(raw);
     const entry = findEntryByHash(rec.hash);
-    if (!entry) return; // 密钥清单变动（如已删除）则重新要求验证
+    if (!entry) return; // 密钥清单变动（如已作废）则重新要求验证
     if (isExpired(entry)) {
       localStorage.removeItem(STORAGE_KEY);
       message.warning("访问密钥已过期，请重新输入");
@@ -102,6 +115,25 @@ async function checkStored() {
     locked.value = false;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
+  }
+}
+
+function onError(reason, expiresAt) {
+  switch (reason) {
+    case "invalid":
+      errorMsg.value = "密钥无效，请检查后重试";
+      break;
+    case "expired":
+      errorMsg.value =
+        "该密钥已过期（有效期至 " +
+        (expiresAt ? new Date(expiresAt).toLocaleString() : "未知") +
+        "）";
+      break;
+    case "bound":
+      errorMsg.value = "该密钥已绑定其他设备，无法在此设备使用";
+      break;
+    default:
+      errorMsg.value = "验证失败，请稍后重试";
   }
 }
 
@@ -114,29 +146,69 @@ async function verify() {
   verifying.value = true;
   errorMsg.value = "";
   try {
+    let result = null;
+    try {
+      const res = await fetch(VERIFY_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: input, deviceId: getDeviceId() }),
+      });
+      if (res.ok) result = await res.json();
+    } catch {
+      // 接口不可用，走本地降级
+    }
+
+    if (result && result.ok) {
+      const hash = await sha256Hex(input);
+      persist(hash, result.type, result.expiresAt);
+      locked.value = false;
+      keyInput.value = "";
+      message.success(
+        result.binding === "enforced"
+          ? "验证成功，本设备已绑定该密钥！"
+          : "验证成功，欢迎回来！",
+      );
+      return;
+    }
+
+    if (result && !result.ok) {
+      onError(result.reason, result.expiresAt);
+      return;
+    }
+
+    // 降级：本地哈希校验（无设备绑定）
     const hash = await sha256Hex(input);
     const entry = findEntryByHash(hash);
     if (!entry) {
-      errorMsg.value = "密钥无效，请检查后重试";
+      onError("invalid");
       return;
     }
     if (isExpired(entry)) {
-      errorMsg.value =
-        "该密钥已过期（有效期至 " +
-        new Date(entry.expiresAt).toLocaleString() +
-        "）";
+      onError("expired", entry.expiresAt);
       return;
     }
-    persist(entry, hash);
+    persist(hash, entry.type, entry.expiresAt);
     locked.value = false;
     keyInput.value = "";
-    message.success("验证成功，欢迎回来！");
+    message.warning("验证成功（服务端绑定暂不可用，按本机模式激活）");
   } finally {
     verifying.value = false;
   }
 }
 
-onMounted(checkStored);
+function onAccessExpired() {
+  localStorage.removeItem(STORAGE_KEY);
+  locked.value = true;
+}
+
+onMounted(() => {
+  checkStored();
+  window.addEventListener("xyzw-access-expired", onAccessExpired);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("xyzw-access-expired", onAccessExpired);
+});
 </script>
 
 <style scoped lang="scss">

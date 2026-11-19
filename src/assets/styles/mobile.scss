@@ -1,30 +1,21 @@
 /* ============================================================
    移动端全局适配层（仅 ≤768px 生效，桌面端行为完全不变）
-
-   目标：
-   1. 消除页面级横向滚动（overflow-x: clip，不产生滚动容器、不影响 sticky 导航）
-   2. 宽表格改为「容器内横向滚动」，而不是把整页撑破
-   3. 弹窗/抽屉限制在屏幕宽度内
-   4. 长文本（Token/URL/JSON）自动换行，不再撑破容器
-   5. 网格/卡片/图片/表单元素全部收敛到视口宽度内
+   v2：新增 批量日常任务 / 营地挑战 两页的定点修复
    ============================================================ */
 
 @media (max-width: 768px) {
-  /* 页面根：禁止横向滚动（clip 不创建滚动容器，sticky 导航不受影响） */
   html,
   body {
     overflow-x: clip;
     max-width: 100vw;
   }
 
-  /* 布局主内容区：子内容再宽也不撑破页面 */
   .default-layout .main {
     min-width: 0;
     max-width: 100%;
     overflow-x: clip;
   }
 
-  /* 通用容器收敛到视口 */
   .container,
   .container-sm,
   .container-lg {
@@ -32,7 +23,6 @@
     min-width: 0;
   }
 
-  /* Naive UI 网格与卡片：允许收缩，不留死宽度 */
   .n-grid,
   .n-grid-item {
     min-width: 0;
@@ -44,12 +34,10 @@
     min-width: 0;
   }
 
-  /* 长文本（Token、URL、JSON）自动换行 */
   body {
     overflow-wrap: anywhere;
   }
 
-  /* Naive UI 表格：横向滚动收在表格容器内部（常见手机尺寸下页面不再左右滑） */
   .n-data-table-wrapper {
     max-width: 100%;
     overflow-x: auto !important;
@@ -60,7 +48,6 @@
     min-width: 0;
   }
 
-  /* 代码块 */
   pre {
     max-width: 100%;
     overflow-x: auto;
@@ -70,7 +57,6 @@
     word-break: break-all;
   }
 
-  /* 弹窗：限制在屏幕内 */
   .n-modal,
   .n-dialog,
   .n-card.n-modal,
@@ -82,16 +68,93 @@
     max-width: 92vw;
   }
 
-  /* 图片自适应 */
   img,
   svg {
     max-width: 100%;
   }
 
-  /* 表单元素不溢出容器 */
   input,
   select,
   textarea {
+    max-width: 100%;
+  }
+
+  /* ---------- 批量日常任务页定点修复 ----------
+     页头大量内联样式 flex 不换行，必须用 !important 覆盖：
+     逐级允许换行，消除竖排挤压与右侧按钮被裁切 */
+  .batch-daily-tasks .page-header,
+  .batch-daily-tasks .page-header > div,
+  .batch-daily-tasks .page-header > div > div,
+  .batch-daily-tasks .page-header > div > div > div {
+    flex-wrap: wrap !important;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .batch-daily-tasks .page-header h2 {
+    font-size: 18px;
+  }
+
+  .batch-daily-tasks {
+    padding: 10px !important;
+  }
+
+  /* Naive 标签页导航条允许横向滑动而不是挤压换行 */
+  .batch-daily-tasks .n-tabs-nav {
+    max-width: 100%;
+  }
+
+  /* ---------- 营地挑战页定点修复 ---------- */
+  .camp-challenge-container {
+    padding: 10px !important;
+  }
+
+  .camp-challenge-container .toolbar .left,
+  .camp-challenge-container .toolbar .right {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .camp-challenge-container .match-title {
+    white-space: normal;
+    font-size: 14px;
+  }
+
+  /* VS 对战卡：窄屏上下堆叠 */
+  .camp-challenge-container .club-vs-container {
+    flex-wrap: wrap;
+  }
+
+  .camp-challenge-container .club-info {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .camp-challenge-container .vs-badge-container {
+    width: 100%;
+    padding: 6px 16px;
+  }
+
+  .camp-challenge-container .club-announce-text {
+    white-space: normal;
+  }
+
+  /* 赛程速览卡片：容器内滑动，不再被裁切 */
+  .camp-challenge-container .schedule-chips {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+
+  .camp-challenge-container .schedule-chip {
+    flex: 0 0 auto;
+    min-width: 120px;
+  }
+
+  /* 对战信息/公会信息等卡片内的行不撑破 */
+  .camp-challenge-container .stats-panels-grid,
+  .camp-challenge-container .stat-metrics-grid {
     max-width: 100%;
   }
 }
