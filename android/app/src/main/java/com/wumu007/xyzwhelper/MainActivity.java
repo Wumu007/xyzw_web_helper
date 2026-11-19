@@ -103,11 +103,14 @@ public class MainActivity extends AppCompatActivity {
         s.setDomStorageEnabled(true);      // localStorage
         s.setDatabaseEnabled(true);        // IndexedDB（Token / BIN 凭据存储）
         s.setLoadWithOverviewMode(true);
-        s.setUseWideViewPort(true);
+        s.setUseWideViewPort(true);        // 遵循页面 viewport meta，按手机屏宽渲染
+        s.setTextZoom(100);                // 固定文字缩放：避免系统大字号把布局撑出横向滚动
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setJavaScriptCanOpenWindowsAutomatically(true);
+
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER); // 消除边缘横滑回弹
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -257,7 +260,7 @@ public class MainActivity extends AppCompatActivity {
                 "(function(){"
                         + "var i=document.querySelector('input[type=file]');"
                         + "if(!i){return 'wait';}"
-                        + "var t=i.closest('.ant-upload')||i.parentElement||i;"
+                        + "var t=i.closest('.ant-upload')||i.closest('.n-upload')||i.parentElement||i;"
                         + "t.style.outline='3px solid #007AFF';"
                         + "t.style.outlineOffset='2px';"
                         + "t.style.borderRadius='12px';"

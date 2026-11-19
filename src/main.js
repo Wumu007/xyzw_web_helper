@@ -7,6 +7,7 @@ import router from "./router";
 import "@arco-design/web-vue/dist/arco.css";
 import "virtual:uno.css";
 import "./assets/styles/global.scss";
+import "./assets/styles/mobile.scss";
 
 // 创建应用实例
 const app = createApp(App);

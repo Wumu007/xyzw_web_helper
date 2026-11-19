@@ -381,7 +381,22 @@ const handleUserAction = async (key) => {
   color: var(--text-primary);
 }
 
+// 主内容区：防止页面内容把布局撑出横向滚动
+.main {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
 @media (max-width: 768px) {
+  .dashboard-nav {
+    padding: 0 var(--spacing-md);
+  }
+
+  .nav-container {
+    height: 52px;
+  }
+
   .nav-item span {
     display: none;
   }
@@ -395,16 +410,25 @@ const handleUserAction = async (key) => {
     flex: 0 0 auto;
   }
 
-  .nav-container {
-    height: 56px;
-  }
-
   .brand-logo {
     display: none;
   }
 
+  .brand-text {
+    font-size: var(--font-size-md);
+  }
+
   .brand-toggle {
     display: inline-flex;
+  }
+
+  .nav-user {
+    gap: var(--spacing-sm);
+  }
+
+  // 用户名较长会把导航撑破，手机端只显示头像
+  .username {
+    display: none;
   }
 }
 
