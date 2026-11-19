@@ -1,17 +1,25 @@
 package com.wumu007.xyzwhelper;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
+import android.text.TextUtils;
+import android.util.Base64;
 import android.view.View;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -26,6 +34,14 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 快乐咸鱼 - 安卓壳应用
@@ -35,7 +51,11 @@ import androidx.appcompat.app.AppCompatActivity;
  *     （保证进入应用时首个弹窗是网页内的密钥验证界面）
  *  2. 文件选择桥接：网页版 BIN 上传组件 ↔ 系统文件选择器（SAF）
  *  3. 底部一键执行快捷栏：日常任务 / 批量日常 / 游戏功能 / 备份恢复
- *  4. 加载进度条、主框架错误重试、备份文件下载（DownloadManager）
+ *  4. 加载进度条、主框架错误重试
+ *  5. 下载双通道：
+ *     - http(s) 下载 → 系统 DownloadManager（无需存储权限）
+ *     - 网页内 blob/data 导出（如「导出长图」）→ JS 钩子捕获 → 原生写入
+ *       公共下载目录（Android 10+ MediaStore 免权限；9 及以下需运行时授权）
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -44,6 +64,8 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String URL_HOME = BASE_URL + "/";
     private static final String URL_BIN_IMPORT = BASE_URL + "/TokenImport/bin";
+
+    private static final int REQ_WRITE_STORAGE = 1001;
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -58,7 +80,13 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> pendingFileChooserCallback;
     private ActivityResultLauncher<Intent> fileChooserLauncher;
 
+    /** 运行时权限被拒前的暂存导出任务 */
+    private String pendingMime;
+    private String pendingName;
+    private byte[] pendingBytes;
+
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService saveExecutor = Executors.newSingleThreadExecutor();
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -113,6 +141,9 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER); // 消除边缘横滑回弹
 
+        // 网页内 blob/data 导出桥接（导出长图、导出配置等）
+        webView.addJavascriptInterface(new DownloadBridge(), "AndroidBridge");
+
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -134,6 +165,8 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
                 errorOverlay.setVisibility(View.GONE);
+
+                installDownloadHook(view);
 
                 String path = Uri.parse(url).getPath();
                 boolean looksLikeNoToken =
@@ -197,9 +230,12 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // 网页版「备份恢复」等导出文件 → 系统下载管理器
+        // 网页版 http(s) 链接下载 → 系统 DownloadManager（无需存储权限）
         webView.setDownloadListener((url, userAgent, contentDisposition,
                                     mimeType, contentLength) -> {
+            if (url == null || url.startsWith("blob:") || url.startsWith("data:")) {
+                return; // blob/data 由 JS 钩子 → DownloadBridge 处理
+            }
             try {
                 DownloadManager.Request req =
                         new DownloadManager.Request(Uri.parse(url));
@@ -226,6 +262,173 @@ public class MainActivity extends AppCompatActivity {
                 toast("下载失败：" + e.getMessage());
             }
         });
+    }
+
+    // ------------------------------------------------------------------
+    // blob/data 导出捕获：点击 a[download] 时把文件内容转 base64 交给原生
+    // ------------------------------------------------------------------
+    private void installDownloadHook(WebView view) {
+        view.evaluateJavascript(
+                "(function(){"
+                        + "if(window.__klDlHook){return;}window.__klDlHook=1;"
+                        + "document.addEventListener('click',function(e){"
+                        + "var t=e.target;var a=null;"
+                        + "while(t&&t!==document){if(t.tagName==='A'&&t.getAttribute('download')!==null){a=t;break;}t=t.parentNode;}"
+                        + "if(!a){return;}"
+                        + "var href=a.getAttribute('href')||'';"
+                        + "if(href.indexOf('blob:')===0){"
+                        + "e.preventDefault();e.stopPropagation();"
+                        + "fetch(href).then(function(r){return r.blob();}).then(function(b){"
+                        + "var fr=new FileReader();"
+                        + "fr.onload=function(){try{window.AndroidBridge.saveBase64(b.type||'application/octet-stream',a.getAttribute('download')||'',String(fr.result).split(',').pop());}catch(err){}};"
+                        + "fr.readAsDataURL(b);"
+                        + "}).catch(function(){});"
+                        + "}else if(href.indexOf('data:')===0){"
+                        + "e.preventDefault();e.stopPropagation();"
+                        + "var comma=href.indexOf(',');"
+                        + "var mime='application/octet-stream';"
+                        + "try{mime=href.slice(5,comma).split(';')[0]||mime;}catch(err){}"
+                        + "try{window.AndroidBridge.saveBase64(mime,a.getAttribute('download')||'',href.slice(comma+1));}catch(err){}"
+                        + "}"
+                        + "},true);"
+                        + "})()",
+                null);
+    }
+
+    // ------------------------------------------------------------------
+    // 导出保存：Android 10+ 走 MediaStore（免权限），9 及以下写公共目录（需运行时权限）
+    // ------------------------------------------------------------------
+    private class DownloadBridge {
+        @JavascriptInterface
+        public void saveBase64(String mime, String name, String base64) {
+            if (TextUtils.isEmpty(base64)) {
+                return;
+            }
+            final byte[] bytes;
+            try {
+                bytes = Base64.decode(base64, Base64.DEFAULT);
+            } catch (Exception e) {
+                return;
+            }
+            final String m = TextUtils.isEmpty(mime) ? "application/octet-stream" : mime;
+            final String n = sanitizeName(name, m);
+            saveExecutor.execute(() -> saveDownload(m, n, bytes));
+        }
+    }
+
+    private String sanitizeName(String name, String mime) {
+        String n = (name == null ? "" : name.trim())
+                .replaceAll("[\\\\/:*?\"<>|]", "_");
+        if (TextUtils.isEmpty(n)) {
+            n = "export-" + System.currentTimeMillis() + extFor(mime);
+        } else if (!n.contains(".")) {
+            n = n + extFor(mime);
+        }
+        return n;
+    }
+
+    private String extFor(String mime) {
+        if (mime == null) return ".bin";
+        switch (mime) {
+            case "image/png": return ".png";
+            case "image/jpeg": return ".jpg";
+            case "image/webp": return ".webp";
+            case "application/json": return ".json";
+            case "application/pdf": return ".pdf";
+            case "application/zip": return ".zip";
+            case "text/plain": return ".txt";
+            case "text/csv": return ".csv";
+            default: return ".bin";
+        }
+    }
+
+    private void saveDownload(String mime, String name, byte[] bytes) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            writeViaMediaStore(mime, name, bytes);
+        } else if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED) {
+            writeLegacy(name, bytes);
+        } else {
+            // 暂存任务，授权后自动续写
+            pendingMime = mime;
+            pendingName = name;
+            pendingBytes = bytes;
+            mainHandler.post(() -> androidx.core.app.ActivityCompat
+                    .requestPermissions(this,
+                            new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                            REQ_WRITE_STORAGE));
+        }
+    }
+
+    private void writeViaMediaStore(String mime, String name, byte[] bytes) {
+        try {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS);
+            Uri uri = getContentResolver()
+                    .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) {
+                toastOnUiThread("导出失败：无法创建下载文件");
+                return;
+            }
+            try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                if (os == null) throw new IllegalStateException("output stream null");
+                os.write(bytes);
+                os.flush();
+            }
+            toastOnUiThread("已保存到「下载」：" + name);
+        } catch (Exception e) {
+            toastOnUiThread("导出失败：" + e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void writeLegacy(String name, byte[] bytes) {
+        try {
+            File dir = Environment
+                    .getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (dir != null && !dir.exists()) {
+                dir.mkdirs();
+            }
+            File f = new File(dir, name);
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                fos.write(bytes);
+                fos.flush();
+            }
+            toastOnUiThread("已保存到「下载」：" + name);
+        } catch (Exception e) {
+            toastOnUiThread("导出失败：" + e.getMessage());
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           String[] permissions,
+                                           int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_WRITE_STORAGE
+                && grantResults != null
+                && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                && pendingBytes != null) {
+            final String m = pendingMime, n = pendingName;
+            final byte[] b = pendingBytes;
+            pendingMime = null;
+            pendingName = null;
+            pendingBytes = null;
+            saveExecutor.execute(() -> writeLegacy(n, b));
+        } else if (requestCode == REQ_WRITE_STORAGE) {
+            pendingMime = null;
+            pendingName = null;
+            pendingBytes = null;
+            toast("未授权存储权限，导出已取消");
+        }
+    }
+
+    private void toastOnUiThread(String msg) {
+        mainHandler.post(() -> toast(msg));
     }
 
     // ------------------------------------------------------------------
@@ -349,6 +552,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         mainHandler.removeCallbacksAndMessages(null);
+        saveExecutor.shutdownNow();
         if (webView != null) {
             webView.destroy();
         }

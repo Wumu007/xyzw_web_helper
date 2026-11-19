@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 仅 Android 9 及以下需要：直接写公共下载目录（Android 10+ 走 MediaStore 无需权限） -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage"
+        xmlns:tools="http://schemas.android.com/tools" />
 
     <application
         android:allowBackup="true"
