@@ -1,16 +1,28 @@
 // Cloudflare Pages Function：POST /api/verify-key
-// 功能：密钥有效性校验 + 一密一机绑定（Cloudflare KV）
+// 语义（v2）：
+//   1. 密钥一次性使用：首次验证成功后即被消耗（KV 记录 used:<hash>），
+//      之后任何终端（包括原终端）再次输入该密钥都会被拒绝；
+//   2. 有效期从输入（激活）时刻起算：expiresAt = 激活时间 + 卡型时长；
+//   3. 终身卡无到期时间。
 //
 // 部署要求（一次性，在 Cloudflare 控制台操作）：
-//   1. Workers & Pages → 项目 xyzw-web-helper-2dx → Settings → Functions
-//   2. KV namespace bindings 新增：变量名 ACCESS_KV，绑定任意一个 KV 命名空间
-//   3. 未配置 KV 时本接口自动降级为"不绑定设备"模式，前端仍可正常验证
+//   Workers & Pages → 项目 xyzw-web-helper-2dx → Settings → Functions →
+//   KV namespace bindings 新增：变量名 ACCESS_KV，绑定任意 KV 命名空间。
+//   未配置 KV 时本接口返回 503，前端自动降级为本机模式（单机限制生效）。
 //
-// KV 存储结构：bind:<sha256(密钥)> = deviceId
-//   - 有效期密钥的绑定记录会在到期后 1 天自动过期清理
-//   - 终身卡永久保存
+// KV 存储结构：used:<sha256(密钥)> = JSON{deviceId, activatedAt, expiresAt}
+//   - 有效期卡的消耗记录在到期后 1 天自动清理；终身卡永久保存
+//   - 注意：KV 为最终一致，毫秒级并发激活存在极小概率双开，可忽略
 
 import ACCESS_KEYS from "../../src/config/access-keys.json";
+
+const DURATIONS_DAYS = {
+  week: 7,
+  month: 30,
+  quarter: 90,
+  year: 365,
+  lifetime: null,
+};
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -43,47 +55,52 @@ export async function onRequestPost({ request, env }) {
     return json({ ok: false, reason: "bad_request" }, 400);
   }
 
+  const kv = env?.ACCESS_KV;
+  if (!kv || typeof kv.get !== "function") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
   const hash = await sha256Hex(key);
   const meta = ACCESS_KEYS.find((k) => k.hash === hash);
   if (!meta) {
     return json({ ok: false, reason: "invalid" });
   }
-  if (meta.expiresAt && Date.now() > new Date(meta.expiresAt).getTime()) {
-    return json({ ok: false, reason: "expired", expiresAt: meta.expiresAt });
+
+  const usedKey = `used:${hash}`;
+  const used = await kv.get(usedKey);
+  if (used) {
+    return json({ ok: false, reason: "used" });
   }
 
-  const kv = env?.ACCESS_KV;
-  if (!kv || typeof kv.get !== "function") {
-    // KV 未绑定：降级为不绑定设备，验证照常通过
-    return json({
-      ok: true,
-      type: meta.type,
-      expiresAt: meta.expiresAt,
-      binding: "disabled",
+  const activatedAt = new Date();
+  const days = DURATIONS_DAYS[meta.type] ?? 30;
+  const expiresAt =
+    days === null
+      ? null
+      : new Date(activatedAt.getTime() + days * 86400000).toISOString();
+
+  const record = JSON.stringify({
+    deviceId,
+    type: meta.type,
+    activatedAt: activatedAt.toISOString(),
+    expiresAt,
+  });
+  if (expiresAt) {
+    const ttl = Math.ceil(
+      (new Date(expiresAt).getTime() - activatedAt.getTime()) / 1000,
+    );
+    // 消耗记录保留到到期后 1 天；KV 最小 TTL 60s
+    await kv.put(usedKey, record, {
+      expirationTtl: Math.max(60, ttl + 86400),
     });
-  }
-
-  const bindKey = `bind:${hash}`;
-  const bound = await kv.get(bindKey);
-  if (bound && bound !== deviceId) {
-    return json({ ok: false, reason: "bound" });
-  }
-  if (!bound) {
-    let opts;
-    if (meta.expiresAt) {
-      const ttl = Math.ceil(
-        (new Date(meta.expiresAt).getTime() - Date.now()) / 1000,
-      );
-      // 到期后绑定记录再多保留 1 天，便于提示"已过期"；KV 最小 TTL 60s
-      opts = { expirationTtl: Math.max(60, ttl + 86400) };
-    }
-    await kv.put(bindKey, deviceId, opts);
+  } else {
+    await kv.put(usedKey, record);
   }
 
   return json({
     ok: true,
     type: meta.type,
-    expiresAt: meta.expiresAt,
-    binding: "enforced",
+    expiresAt,
+    activatedAt: activatedAt.toISOString(),
   });
 }
