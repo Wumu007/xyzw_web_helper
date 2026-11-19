@@ -1,0 +1,42 @@
+[
+  {
+    "id": "week-20261119",
+    "type": "week",
+    "note": "周卡",
+    "createdAt": "2026-11-19T08:17:25Z",
+    "expiresAt": "2026-11-26T08:17:25Z",
+    "hash": "dc813d373eddd1cfdb5fd780d6028fbaade118f78be739f0008ccfa0c58b27fa"
+  },
+  {
+    "id": "month-20261119",
+    "type": "month",
+    "note": "月卡",
+    "createdAt": "2026-11-19T08:17:25Z",
+    "expiresAt": "2026-12-19T08:17:25Z",
+    "hash": "14fb4fee07aff484998055cb6a51bac7251c0dd34df822a61c4e732748b46723"
+  },
+  {
+    "id": "quarter-20261119",
+    "type": "quarter",
+    "note": "季卡",
+    "createdAt": "2026-11-19T08:17:26Z",
+    "expiresAt": "2027-02-17T08:17:26Z",
+    "hash": "eac2f32becdacff871de752380f0f745c37ca117bef9b5e1c5f2a0d0e3eddfdf"
+  },
+  {
+    "id": "year-20261119",
+    "type": "year",
+    "note": "年卡",
+    "createdAt": "2026-11-19T08:17:27Z",
+    "expiresAt": "2027-11-19T08:17:27Z",
+    "hash": "f0e7f5c15e161c83f4c093c47687349e8fb5c8aa7c03aec0fe5d77975d04769a"
+  },
+  {
+    "id": "lifetime-20261119",
+    "type": "lifetime",
+    "note": "终身卡",
+    "createdAt": "2026-11-19T08:17:28Z",
+    "expiresAt": null,
+    "hash": "9a043d645591bbd5927111df077c7a1ce4da8f2bc667cf454edffaf0c375ea59"
+  }
+]

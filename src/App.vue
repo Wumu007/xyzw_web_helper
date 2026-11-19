@@ -7,6 +7,8 @@
             <div id="app">
               <router-view />
             </div>
+            <!-- 访问密钥门禁：全站软门禁，access-keys.json 为空时自动关闭 -->
+            <AccessGate />
           </n-dialog-provider>
         </n-notification-provider>
       </n-loading-bar-provider>
@@ -18,6 +20,7 @@
 import { darkTheme } from "naive-ui";
 import { computed, onMounted, onUnmounted } from "vue";
 import { useTheme } from "@/composables/useTheme";
+import AccessGate from "@/components/Common/AccessGate.vue";
 
 const { isDark, initTheme, setupSystemThemeListener, updateReactiveState } =
   useTheme();
