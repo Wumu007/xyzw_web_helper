@@ -149,6 +149,67 @@ export async function fillHangUpTime({
   return { sent: before.remaining, ...after };
 }
 
+const OFFICIAL_CDN_BASE = "https://xxz-xyzw-res.hortorgames.com";
+const CONFIG_REQUEST_TIMEOUT = 30000;
+const VERSION_INDEX_TIMEOUT = 15000;
+
+/**
+ * Fetch the official configuration, falling back when the CDN lacks the version.
+ * 官方换版本时，游戏服会先下发新的 dataBundleVer，而 CDN 资源往往滞后发布，
+ * 老客户端请求 /data/<ver>/config.json 会拿到 404（官方任务配置读取失败）。
+ * 此时改用官方 /data/version.json 声明的当前版本，尽量让任务模块可用。
+ * @param {Function} fetchConfig Fetch implementation for the official CDN.
+ * @param {string} version Version announced by the game server.
+ * @returns {Promise<object>} Official configuration JSON.
+ * @throws {Error} When neither the announced nor the current CDN version is readable.
+ */
+async function fetchOfficialConfig(fetchConfig, version) {
+  const response = await fetchConfig(
+    `${OFFICIAL_CDN_BASE}/data/${version}/config.json`,
+    { signal: AbortSignal.timeout(CONFIG_REQUEST_TIMEOUT) },
+  );
+  if (response.ok) return response.json();
+  // 仅 404（该版本资源缺失）才回退，其它状态码保持原样抛出，避免掩盖真实故障。
+  if (response.status === 404) {
+    const fallback = await fetchFallbackConfig(fetchConfig, version);
+    if (fallback) return fallback;
+  }
+  throw new Error(
+    `官方任务配置读取失败（HTTP ${response.status || 0}，版本 ${version}）`,
+  );
+}
+
+/**
+ * Read the CDN-declared current version and load its configuration instead.
+ * @param {Function} fetchConfig Fetch implementation for the official CDN.
+ * @param {string} version Version announced by the game server.
+ * @returns {Promise<object|null>} Fallback configuration, or null when unusable.
+ */
+async function fetchFallbackConfig(fetchConfig, version) {
+  try {
+    const indexResponse = await fetchConfig(
+      `${OFFICIAL_CDN_BASE}/data/version.json`,
+      { signal: AbortSignal.timeout(VERSION_INDEX_TIMEOUT) },
+    );
+    if (!indexResponse.ok) return null;
+    const index = await indexResponse.json();
+    const candidate = typeof index?.version === "string" ? index.version : "";
+    if (!candidate || !/^[\w-]+$/.test(candidate) || candidate === version)
+      return null;
+    const response = await fetchConfig(
+      `${OFFICIAL_CDN_BASE}/data/${candidate}/config.json`,
+      { signal: AbortSignal.timeout(CONFIG_REQUEST_TIMEOUT) },
+    );
+    if (!response.ok) return null;
+    console.warn(
+      `[dailyTask] 官方数据版本 ${version} 在 CDN 缺失，已回退至官方当前版本 ${candidate}`,
+    );
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Load task targets from the official data version returned by the game server.
  * Only immutable configuration is cached; role progress is never cached here.
@@ -173,12 +234,7 @@ export async function loadDailyTaskConfig(
     throw new Error("服务器未提供有效的任务配置版本");
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
-      const response = await fetchConfig(
-        `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
-        { signal: AbortSignal.timeout(30000) },
-      );
-      if (!response.ok) throw new Error("官方任务配置读取失败");
-      const config = await response.json();
+      const config = await fetchOfficialConfig(fetchConfig, version);
       return validateDailyTaskConfig(config);
     })();
     configsByVersion.set(version, loading);
