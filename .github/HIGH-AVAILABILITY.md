@@ -22,7 +22,7 @@
 
 `pnpm build` 成功 ≠ 线上能用。2026-11-20 的 405 故障就是典型：构建“成功”，但 `dist/_worker.js` 里没有 `/api/verify-key` 路由，接口退化为静态资源 405。
 
-因此把“能不能跑”变成构建期硬检查：
+因此把“能不能跑”变成构建期硬检查（**已在 Pages 生产构建中实测生效**：`[PASSED] 7 项通过、0 项警告`）：
 
 | 检查 | 缺失后果 |
 |---|---|
@@ -30,6 +30,7 @@
 | `dist/_worker.js` 存在、含 `export default`、含 `/api/verify-key` 路由 | 卡密接口 405，全部降级本机模式 |
 | `dist/access-keys.json` 为非空数组且每条含 64 位 sha256 | 所有卡密失效 |
 | `dist/assets/` 存在 | 前端脚本未产出 |
+| `_worker.js` 保留 `env.ASSETS` 透传 | 接口通、页面全挂 |
 
 ### 已内嵌进构建脚本（关键，2026-11-20 落地）
 
@@ -49,7 +50,7 @@
 | 自动同步 `verify` 作业 | `pnpm build` | 试合并上游后的 `dist` |
 | Cloudflare Pages | `npm run build` | **Pages 自己构建、真正要部署的那份 `dist`** |
 
-最后一行是重点：**Pages 的构建命令保持 `npm run build` 不动即可**，无需在控制台额外拼接校验命令（避免忘记改、改错格式）。校验失败 → 构建命令以非 0 退出 → Pages 判定构建失败 → **不切换生产别名，线上继续跑上一个版本**。
+最后一行是重点：**Pages 的构建命令保持 `npm run build` 不动即可**，无需在控制台额外拼接校验命令。校验失败 → 构建命令以非 0 退出 → Pages 判定构建失败 → **不切换生产别名，线上继续跑上一个版本**。
 
 单独运行（排查时用）：
 
@@ -60,7 +61,7 @@ node scripts/verify-dist.mjs path/to/dist
 
 ### 为什么不用「CI 直传 Pages」
 
-CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 两个 secret，并要断开 Pages 的 Git 集成、把部署入口唯一化。它相对本方案唯一的增量是“依赖安装环境完全一致”；而本方案让校验直接作用于 Pages 自己的产物，已覆盖「产物残缺」这一类真实故障（2026-11-20 的 405 即此类）。投入产出不划算，暂不实施。
+CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 两个 secret，并要断开 Pages 的 Git 集成。它相对本方案唯一的增量是“依赖安装环境完全一致”；而本方案让校验直接作用于 Pages 自己的产物，已覆盖「产物残缺」这一类真实故障。投入产出不划算，暂不实施。
 
 ---
 
@@ -84,16 +85,27 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 
 ## 四、需要在控制台完成的配置
 
-### 1. 给 main 加分支保护（唯一待办，强烈建议）
+### 1. GitHub 分支保护（唯一待办，强烈建议）
 
-`Settings → Branches → Add branch protection rule`
+> ⚠️ 注意：这是 **GitHub 仓库** 的设置（合并前要求 CI 通过），不是 Cloudflare Pages 的「分支控制」（那个管的是哪些分支自动部署）。
 
-- Branch name pattern：`main`
-- 勾选 **Require status checks to pass before merging**
-- 在状态检查里选 **`构建与测试`**（来自 CI 工作流）
-- 建议同时勾选 **Require a pull request before merging**（对人工提交生效；自动同步是直推，不受此限制，靠 L2 兜底）
+路径（两种界面任选）：
 
-作用：人工改代码必须过 CI 才能合并。`lint` 特意设为非阻塞（`continue-on-error`），因为风格问题不影响运行；观察一周稳定后可改为阻塞。
+- **Rulesets（新版）**：`Settings → Rules → Rulesets → New branch ruleset`
+- **Branch protection（旧版）**：`Settings → Branches → Add branch protection rule`
+
+配置要点：
+
+| 选项 | 建议 | 理由 |
+|---|---|---|
+| Target branches | `main`（或 `Include default branch`） | —— |
+| **Require status checks to pass** | ✅ **勾选**，并选中 **`构建与测试`** | 人工 PR 必须过 CI 才能合并 |
+| **Require a pull request before merging** | ❌ **不要勾** | 自动同步是 `git push` 直推 main，一旦要求 PR，直推会被拒（GH006），**定时同步会彻底失效** |
+| 其余（线性历史 / 签名 / 禁止强推） | 可不勾 | 非必需 |
+
+如果确实需要「Require a pull request」，必须同时把 `github-actions[bot]` 加入 **bypass 列表**（仅 Rulesets 支持 bypass，旧版 branch protection 不支持）。否则不要开。
+
+补充：`Require status checks` 只约束 PR 合并，**不会拦住自动同步的直推**，所以 L2 门禁与新分支保护不冲突。
 
 ### 2. 确认 KV 绑定仍然有效
 
@@ -101,9 +113,13 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 
 若被解绑，`/api/verify-key` 会返回 503，巡检会报 WARN（不是 FAIL，因为前端会自动降级本机模式，站点仍然能用）。
 
-### 3. 构建命令保持 `npm run build` 即可
+### 3. Cloudflare Pages 「分支控制」怎么设（参考）
 
-不需要手动拼接校验命令 —— 已在 `package.json` 的 `build` 脚本内完成，见第二节。
+`设置 → 构建 → 分支控制`：
+
+- 生产分支 `main` + 启用「自动生产分支部署」 → 每次 push main 自动上线，✅ 保持
+- 预览分支：选「所有非生产分支」会为任何分支（包括同步冲突时创建的 `sync-upstream/*`）生成预览部署，消耗构建次数；若不在意预览，可选「无」以省配额
+- 构建命令保持 `npm run build`（校验已内嵌，见第二节）
 
 ### 4. GitHub Actions 额度
 
@@ -121,7 +137,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 | 巡检报「首页 500 / 分片 404」 | Pages 构建失败或部署中断 | 看 Pages 构建日志；回滚上一个正常部署 |
 | 巡检报「卡密接口 503」 | KV 绑定丢失 | 重新绑定 `ACCESS_KV`，重试部署 |
 | 巡检只有「官方数据源 WARN」 | 官方换版本、资源未发布 | 无需操作，工具已自动回退；等官方补齐 |
-| 自动同步连续失败 | 上游代码构建不过 | 正常现象，线上停在旧版本；等上游修复，或手工挑选合并 |
+| 自动同步连续失败 | 上游代码构建不过，**或误开了 Require a pull request** | 前者等上游修复；后者关掉该规则或给 bot 加 bypass |
 
 **回滚优先用 Cloudflare 控制台**：`部署 → 选择上一个正常版本 → 回滚`，秒级生效且不产生新提交。
 `healthcheck.yml` 的 `rollback_commits` 仅作为没有控制台权限时的应急手段（会生成 revert 提交，遇合并提交可能冲突）。
