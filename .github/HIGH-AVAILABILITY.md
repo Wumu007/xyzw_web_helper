@@ -2,6 +2,8 @@
 
 目标：**让线上尽可能一直可运行**。不靠“不出错”，而靠“错了也进不来、进来了也挡得住、挂了立刻知道、退了能马上退回去”。
 
+> **当前状态（2026-11-20）**：L1–L5 已全部就位。产物契约校验已在 Pages 生产构建中实测生效（`[PASSED] 7 项通过、0 项警告`）；GitHub 分支保护已配置（`main` + Require status checks `构建与测试`，**未**启用 Require a pull request）。
+
 ---
 
 ## 一、五层防线
@@ -14,7 +16,7 @@
 | L4 运行时降级 | KV 缺失 → 前端降级本机校验；官方配置 404 → 回退权威版本 | 外部依赖异常导致整体不可用 | `worker.js`、`src/utils/dailyTaskState.js`、`AccessGate.vue` |
 | L5 快速回滚 | Cloudflare 控制台部署回滚（秒级）；或手动触发 workflow 生成 revert 提交 | 坏版本已上线 | 控制台 + `healthcheck.yml`（`rollback` 作业） |
 
-关键点：**L2 是 main 分支唯一的自动化防线**。因为 `auto-sync-upstream` 是直接 `git push` 到 main（快进/合并），完全不经过 PR 与分支保护，L1 对它是失效的。
+关键点：**L2 是 main 分支唯一的自动化防线**。因为 `auto-sync-upstream` 是直接 `git push` 到 main（快进/合并），完全不经过 PR；而分支保护的 `Require status checks` 只约束 PR 合并，不拦直推。所以直推路径上真正把关的是 L2。
 
 ---
 
@@ -52,6 +54,19 @@
 
 最后一行是重点：**Pages 的构建命令保持 `npm run build` 不动即可**，无需在控制台额外拼接校验命令。校验失败 → 构建命令以非 0 退出 → Pages 判定构建失败 → **不切换生产别名，线上继续跑上一个版本**。
 
+Pages 构建日志里的关键特征（用于人工确认门禁确实在跑）：
+
+```
+[copy-worker] worker.js copied to dist/_worker.js
+构建产物校验：/opt/buildhome/repo/dist
+  OK    index.html 含 #app 挂载点
+  ...
+[PASSED] 7 项通过、0 项警告。
+Found _worker.js in output directory. Uploading.
+```
+
+其中 `Found _worker.js in output directory` 说明高级模式由 `dist/_worker.js` 决定，**与 `wrangler.toml` 无关**（这也是早期 `functions/` 目录始终不生效的原因）。
+
 单独运行（排查时用）：
 
 ```bash
@@ -83,29 +98,27 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 
 ---
 
-## 四、需要在控制台完成的配置
+## 四、控制台配置
 
-### 1. GitHub 分支保护（唯一待办，强烈建议）
+### 1. GitHub 分支保护（✅ 已于 2026-11-20 配置）
 
-> ⚠️ 注意：这是 **GitHub 仓库** 的设置（合并前要求 CI 通过），不是 Cloudflare Pages 的「分支控制」（那个管的是哪些分支自动部署）。
+> ⚠️ 这是 **GitHub 仓库** 的设置（合并前要求 CI 通过），不是 Cloudflare Pages 的「分支控制」（那个管的是哪些分支自动部署）。
 
 路径（两种界面任选）：
 
+- **Branch protection（旧版）**：`Settings → Branches → Add classic branch protection rule`
 - **Rulesets（新版）**：`Settings → Rules → Rulesets → New branch ruleset`
-- **Branch protection（旧版）**：`Settings → Branches → Add branch protection rule`
 
-配置要点：
+实际配置：
 
-| 选项 | 建议 | 理由 |
+| 选项 | 取值 | 说明 |
 |---|---|---|
-| Target branches | `main`（或 `Include default branch`） | —— |
-| **Require status checks to pass** | ✅ **勾选**，并选中 **`构建与测试`** | 人工 PR 必须过 CI 才能合并 |
-| **Require a pull request before merging** | ❌ **不要勾** | 自动同步是 `git push` 直推 main，一旦要求 PR，直推会被拒（GH006），**定时同步会彻底失效** |
-| 其余（线性历史 / 签名 / 禁止强推） | 可不勾 | 非必需 |
+| Branch name pattern | `main` | —— |
+| Require status checks to pass | ✅ 勾选，选中 `构建与测试` | 人工 PR 必须过 CI 才能合并 |
+| Require a pull request before merging | ❌ **未勾** | 自动同步是 `git push` 直推 main，一旦要求 PR，直推会被拒（GH006），定时同步会彻底失效 |
+| 其余（线性历史 / 签名 / 锁分支 / 禁强推 / 禁删除） | 均未勾 | 保留应急弹性 |
 
-如果确实需要「Require a pull request」，必须同时把 `github-actions[bot]` 加入 **bypass 列表**（仅 Rulesets 支持 bypass，旧版 branch protection 不支持）。否则不要开。
-
-补充：`Require status checks` 只约束 PR 合并，**不会拦住自动同步的直推**，所以 L2 门禁与新分支保护不冲突。
+如果将来确实需要「Require a pull request」，必须同时把 `github-actions[bot]` 加入 **bypass 列表**（仅 Rulesets 支持 bypass，classic 规则不支持），否则自动同步会断。
 
 ### 2. 确认 KV 绑定仍然有效
 
@@ -137,7 +150,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 | 巡检报「首页 500 / 分片 404」 | Pages 构建失败或部署中断 | 看 Pages 构建日志；回滚上一个正常部署 |
 | 巡检报「卡密接口 503」 | KV 绑定丢失 | 重新绑定 `ACCESS_KV`，重试部署 |
 | 巡检只有「官方数据源 WARN」 | 官方换版本、资源未发布 | 无需操作，工具已自动回退；等官方补齐 |
-| 自动同步连续失败 | 上游代码构建不过，**或误开了 Require a pull request** | 前者等上游修复；后者关掉该规则或给 bot 加 bypass |
+| 自动同步连续失败 | 上游构建不过，**或误开了 Require a pull request** | 前者等上游修复；后者关掉该规则或给 bot 加 bypass |
 
 **回滚优先用 Cloudflare 控制台**：`部署 → 选择上一个正常版本 → 回滚`，秒级生效且不产生新提交。
 `healthcheck.yml` 的 `rollback_commits` 仅作为没有控制台权限时的应急手段（会生成 revert 提交，遇合并提交可能冲突）。
@@ -151,6 +164,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 3. **巡检粒度 30 分钟**：故障最长可能 30 分钟才被发现（GitHub 定时任务不支持更细粒度）。
 4. **无跨用户真实链路验证**：巡检只验证“服务在”，不验证“能登录、能跑任务”，后者需要真实账号。
 5. **卡密服务仍依赖 KV**：KV 不可用时只能降级本机模式，“一机一密”的强度会下降。
+6. **分支保护只覆盖 PR**：直推路径（自动同步、API 推代码）不受 `Require status checks` 约束，靠 L2 门禁与产物校验兼顾；这是为了不让自动同步失效而做的取舍。
 
 ---
 
@@ -158,7 +172,6 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 
 | 优先级 | 事项 | 收益 |
 |---|---|---|
-| P0 | 配 branch protection（第四节第 1 条） | 人工提交的坏代码进不了 main |
 | P1 | 每日一次定时 `pnpm test`（当前只在 push 时跑） | 捕捉上游依赖漂移导致的隐性回归 |
 | P2 | CI 直传 Pages（去掉双份构建） | 依赖安装环境完全统一；代价是 2 个 secret + 断开 Git 集成，主要风险已被内嵌校验覆盖 |
 | P2 | 第二托管（EdgeOne/Vercel）+ APP 内置备用域名切换 | 扛住平台级故障 |
