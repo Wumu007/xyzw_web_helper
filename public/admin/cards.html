@@ -125,7 +125,33 @@
   .pill.active{color:var(--green); background:var(--green-soft)}
   .pill.expired{color:var(--amber); background:var(--amber-soft)}
   .pill.revoked{color:var(--red); background:var(--red-soft)}
-  .tag{font-size:12px; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); padding:2px 7px; border-radius:6px}
+  .tag{font-size:12px; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); padding:2px 7px; border-radius:6px; white-space:nowrap}
+
+  /* 卡密列：原文为主，hash 作副标识 */
+  .key-plain{cursor:copy}
+  .key-plain:hover{color:var(--accent)}
+  .key-hash{color:#98a1b0; font-weight:600}
+  .hash-tag{color:#98a1b0}
+  .mini-badge{
+    display:inline-block; margin-left:7px; font-size:11px; font-weight:650; line-height:16px;
+    padding:0 6px; border-radius:999px; background:var(--accent-soft); color:var(--accent)
+  }
+  .mini-badge.warn{background:var(--amber-soft); color:var(--amber)}
+
+  .notice{
+    padding:10px 16px; font-size:12.5px; color:var(--amber); background:var(--amber-soft);
+    border-bottom:1px solid #f3ddb8; display:flex; align-items:center; gap:8px
+  }
+  .notice[hidden]{display:none}   /* 作者样式的 display 会盖掉 hidden，必须显式关掉 */
+  .notice b{font-weight:650}
+
+  .keybox{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:8px 10px
+  }
+  .keybox .v{font-size:13px; font-weight:600; word-break:break-all; min-width:0}
+  .keybox .v.full{font-size:11.5px; font-weight:500; color:#5b6474}
+  .keybox.warn{background:#fffdf6; border-color:#f3ddb8}
 
   .empty{padding:56px 20px; text-align:center; color:var(--muted)}
   .empty .big{font-size:15px; color:#3d4657; margin-bottom:6px}
@@ -214,6 +240,7 @@
     <div class="brand"><span class="logo">K</span>卡密管理</div>
     <span id="modeBadge" class="badge">加载中</span>
     <span class="spacer"></span>
+    <button class="btn" id="btnKeymap" title="导入本地明文清单，把 hash 换成 KL- 开头的原始卡密">明文清单<span class="mini-badge warn" id="keymapCount">0</span></button>
     <button class="btn" id="btnRefresh">刷新</button>
     <button class="btn" id="btnSettings">设置</button>
   </div>
@@ -245,11 +272,14 @@
       </select>
       <span class="count" id="count"></span>
     </div>
+    <div class="notice" id="kmNotice" hidden>
+      <b>当前显示的是 hash 标识。</b>点右上「明文清单」导入本地明文，列表就会直接显示 KL- 开头的原始卡密。
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th style="width:150px">卡密</th>
+            <th style="width:212px">卡密（原文 / hash）</th>
             <th style="width:96px">状态</th>
             <th style="width:80px">类型</th>
             <th class="col-expire" style="width:132px">到期</th>
@@ -300,6 +330,28 @@
   </div>
 </div>
 
+<div class="dialog" id="keymapDlg">
+  <div class="dialog-card">
+    <h3>明文清单：建立「原始卡密 ↔ hash」对应</h3>
+    <div class="body">
+      <div class="dialog-note" id="kmStatus" style="margin-top:0"></div>
+      <label for="kmFile">选择文件（keymap.json / 密钥 txt / CSV）</label>
+      <input id="kmFile" type="file" accept=".json,.txt,.csv,text/plain,application/json">
+      <label for="kmText">或直接粘贴（一行一张也行，清单原文也行）</label>
+      <textarea id="kmText" placeholder="KL-9d288a-fd742c-91368c&#10;KL-c928c4-6d0458-3d41cd&#10;…"></textarea>
+      <div class="dialog-note">
+        服务端只存 sha256，原文只在你本机。这里导入的明文仅保存在<b>本浏览器 localStorage</b>，不会上传到任何服务器。<br>
+        页面会用 sha256 现算 hash 并自动配对，和你生成卡密时的算法完全一致。
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn danger" id="btnKmClear">清空已导入</button>
+      <button class="btn" id="btnKmCancel">取消</button>
+      <button class="btn primary" id="btnKmImport">解析并合并</button>
+    </div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
 <script>
@@ -313,7 +365,8 @@
     token: 'xyzw_cards_token',
     base: 'xyzw_cards_base',
     mode: 'xyzw_cards_mode',
-    mock: 'xyzw_cards_mock_v3'
+    mock: 'xyzw_cards_mock_v5',
+    keymap: 'xyzw_cards_keymap_v1'
   };
   var TYPES = {
     week: { label: '周卡', days: 7 },
@@ -383,6 +436,139 @@
     if (res.status === 404) return REASON_TEXT.not_found;
     var r = data && data.reason;
     return (r && REASON_TEXT[r]) || r || ('HTTP ' + res.status);
+  }
+
+  var KEY_RE = /KL-[0-9a-fA-F]{6}-[0-9a-fA-F]{6}-[0-9a-fA-F]{6}/g;
+  var KEY_ONE = /^KL-[0-9a-fA-F]{6}-[0-9a-fA-F]{6}-[0-9a-fA-F]{6}$/;
+  var HASH_RE = /^[0-9a-f]{64}$/;
+
+  /** 统一搜索口径：去掉大小写和分隔符，"kl9d288a" 也能搜到 "KL-9d288a-…" */
+  function normA(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+  /** sha256 十六进制，与 worker.js / keygen.mjs 的 sha256Hex(key) 完全一致 */
+  function sha256Hex(text) {
+    if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+      var buf = new TextEncoder().encode(text);
+      return crypto.subtle.digest('SHA-256', buf).then(function (digest) {
+        var bytes = new Uint8Array(digest), out = '';
+        for (var i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+        return out;
+      });
+    }
+    return Promise.reject(new Error('浏览器不允许计算 hash（需要 https 或 localhost 打开）'));
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    // file:// 或旧浏览器的兜底
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) { /* 忽略 */ }
+    ta.remove();
+    return Promise.resolve();
+  }
+
+  /* ============================================================
+   * 1.2 明文映射（hash -> 原始卡密）
+   *
+   * 服务端只存 sha256，没有明文，也不会返回明文——这是刻意的安全设计。
+   * 所以「哪张是哪张」只能靠本机这份映射：你导入本地密钥清单，
+   * 页面用 sha256 现算并配对，结果存在本浏览器 localStorage。
+   * 全程不上传，也不改变任何生成 / 存储规则。
+   * ============================================================ */
+  var KeyMap = {
+    map: {},
+    load: function () {
+      try {
+        var raw = localStorage.getItem(LS.keymap);
+        var obj = raw ? JSON.parse(raw) : null;
+        this.map = (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+      } catch (e) {
+        this.map = {};
+      }
+      return this;
+    },
+    save: function () {
+      try { localStorage.setItem(LS.keymap, JSON.stringify(this.map)); } catch (e) { /* 配额满就算了 */ }
+    },
+    get: function (hash) { return this.map[String(hash || '').toLowerCase()] || ''; },
+    size: function () { return Object.keys(this.map).length; },
+    /** 返回 'new' / 'same' / 'bad' */
+    set: function (hash, key) {
+      var h = String(hash || '').toLowerCase();
+      var k = String(key || '').trim();
+      if (!HASH_RE.test(h) || !KEY_ONE.test(k)) return 'bad';
+      if (this.map[h] === k) return 'same';
+      this.map[h] = k;
+      return 'new';
+    },
+    clear: function () { this.map = {}; this.save(); }
+  };
+
+  /**
+   * 导入一段文本，自动识别三种形态，返回 { paired, computed, duplicate, invalid }
+   *   1) JSON：{ entries:[{key,hash}] } / [{key,hash}] / { hash: "KL-…" } 这类成对数据
+   *   2) 成对行：<64 位 hash> , KL-xxxxxx-xxxxxx-xxxxxx（CSV / TSV 都行）
+   *   3) 纯卡密：每行或清单里任意位置出现的 KL-xxx，逐个算 sha256
+   */
+  async function ingestKeymap(text) {
+    var res = { paired: 0, computed: 0, duplicate: 0, invalid: 0 };
+    var src = String(text || '');
+    var seen = {};
+
+    function take(hash, key) {
+      var mark = KeyMap.set(hash, key);
+      if (mark === 'new') { seen[normA(key)] = 1; return true; }
+      if (mark === 'same') res.duplicate++;
+      else res.invalid++;
+      return false;
+    }
+
+    // 1) JSON（先试，成功后就不再对整段做正则扫描，省掉重复计算）
+    var parsed = null;
+    try { parsed = JSON.parse(src); } catch (e) { parsed = null; }
+    if (parsed) {
+      var rows = Array.isArray(parsed) ? parsed
+        : (Array.isArray(parsed.entries) ? parsed.entries
+          : (Array.isArray(parsed.keys) ? parsed.keys : (Array.isArray(parsed.items) ? parsed.items : [])));
+      rows.forEach(function (r) {
+        if (!r) return;
+        if (typeof r === 'string') return; // 字符串数组交给第 3 步现算
+        var k = r.key || r.plain || r.plaintext || r.卡密 || '';
+        var h = r.hash || r.sha256 || '';
+        // 只有明文没有 hash 的，留给第 3 步现算
+        if (k && h) { if (take(h, k)) res.paired++; }
+      });
+    }
+
+    // 2) 成对行：hash 与卡密同行（顺序不限）
+    var pairRe = /([0-9a-fA-F]{64})[^\n]*?(KL-[0-9a-fA-F]{6}-[0-9a-fA-F]{6}-[0-9a-fA-F]{6})/g;
+    var m;
+    var lines = src.split(/\r?\n/);
+    lines.forEach(function (line) {
+      pairRe.lastIndex = 0;
+      var hit = pairRe.exec(line);
+      if (hit) { if (take(hit[1], hit[2])) res.paired++; }
+    });
+
+    // 3) 纯卡密：剩下的全部按 sha256 现算
+    var all = src.match(KEY_RE) || [];
+    for (var i = 0; i < all.length; i++) {
+      var key = String(all[i]).trim();
+      if (seen[normA(key)]) continue;
+      var hash;
+      try {
+        hash = await sha256Hex(key);
+      } catch (e) {
+        throw e;
+      }
+      if (take(hash, key)) res.computed++;
+    }
+    KeyMap.save();
+    return res;
   }
 
   /* ============================================================
@@ -516,9 +702,19 @@
       var status = spec.status;
       var hash = '';
       for (var j = 0; j < 64; j++) hash += '0123456789abcdef'[(i * 7 + j * 13 + 5) % 16];
+      // 演示数据自带一份格式合法的假明文，用来展示新的展示层；
+      // 真实数据不会走到这里，只能靠导入本地明文清单建立映射。
+      // 最后 2 张故意不给明文，模拟「清单里找不到原文」的真实情况。
+      var seg = function (n) {
+        var s = '';
+        for (var q = 0; q < 6; q++) s += '0123456789abcdef'[(i * 11 + n * 29 + q * 17 + 3) % 16];
+        return s;
+      };
+      var hasPlain = i < specs.length - 2;
       var item = {
         hash: hash,
         hashPrefix: hash.slice(0, 8),
+        plain: hasPlain ? 'KL-' + seg(0) + '-' + seg(1) + '-' + seg(2) : '',
         type: type,
         status: status,
         deviceId: null,
@@ -652,18 +848,40 @@
   /* ============================================================
    * 4. 渲染
    * ============================================================ */
+
+  /** 取一张卡的原始卡密：演示数据自带 plain，真实数据查本地导入的映射 */
+  function plainOf(it) {
+    return (it && (it.plain || KeyMap.get(it.hash))) || '';
+  }
+  function hashTag(it) { return '#' + String(it.hash || '').slice(0, 8); }
+
+  /** 顶栏按钮上的角标：已载入多少张明文 */
+  function renderKeymapBadge() {
+    var n = KeyMap.size();
+    var el = $('keymapCount');
+    el.textContent = n ? String(n) : '未导入';
+    el.className = 'mini-badge' + (n ? '' : ' warn');
+    $('btnKeymap').title = n
+      ? '已载入 ' + n + ' 张明文，点击可追加或清空'
+      : '导入本地明文清单，把 hash 换成 KL- 开头的原始卡密';
+  }
+
   function filtered() {
-    var q = state.q.trim().toLowerCase();
+    var q = state.q.trim();
+    var ql = q.toLowerCase();
+    var qn = normA(q);
     return state.items.filter(function (it) {
       if (state.type !== 'all' && it.type !== state.type) return false;
       if (state.status !== 'all' && it.status !== state.status) return false;
       if (!q) return true;
       var hay = [
-        it.hashPrefix, it.hash, it.note || '', it.deviceId || '',
+        plainOf(it), hashTag(it), it.hashPrefix, it.hash, it.note || '', it.deviceId || '',
         (TYPES[it.type] || {}).label || it.type,
         (STATUS[it.status] || {}).label || it.status
-      ].join(' ').toLowerCase();
-      return hay.indexOf(q) > -1;
+      ].join(' ');
+      if (hay.toLowerCase().indexOf(ql) > -1) return true;
+      // 容错：忽略大小写与分隔符，粘贴 "kl9d288a" 或 "9D288A" 都能命中
+      return qn.length >= 4 && normA(hay).indexOf(qn) > -1;
     });
   }
 
@@ -685,7 +903,12 @@
 
   function renderRows() {
     var list = filtered();
-    $('count').textContent = '显示 ' + list.length + ' / ' + state.items.length + ' 张';
+    var withPlain = state.items.filter(function (i) { return plainOf(i); }).length;
+    $('count').textContent = '显示 ' + list.length + ' / ' + state.items.length + ' 张' +
+      (state.items.length ? ' · 明文 ' + withPlain + '/' + state.items.length : '');
+    // 一张明文都没有时给个引导，避免误以为系统只认 hash
+    $('kmNotice').hidden = !(state.items.length > 0 && withPlain === 0);
+
     var tbody = $('rows');
     if (!list.length) {
       tbody.innerHTML = '';
@@ -700,8 +923,15 @@
       var note = it.note
         ? '<span class="note" title="' + esc(it.note) + '">' + esc(it.note) + '</span>'
         : '<span class="note empty">' + (it.status === 'unused' ? '未使用' : '点击添加备注') + '</span>';
+      // 主行优先显示原始卡密，hash 缩成 #前缀 作副标识；没有明文时退回 hash 前缀
+      var plain = plainOf(it);
+      var keyCell = plain
+        ? '<div class="key mono key-plain" data-copy="' + esc(plain) + '" title="点击复制这张卡的原始卡密">' + esc(plain) + '</div>' +
+          '<div class="sub mono hash-tag" title="对应 hash：' + esc(it.hash) + '">' + esc(hashTag(it)) + '</div>'
+        : '<div class="key mono key-hash" title="未导入明文，只能显示 hash">' + esc(hashTag(it)) + '…</div>' +
+          '<div class="sub mono">' + esc(String(it.hash).slice(8, 16)) + '…</div>';
       return '<tr data-hash="' + esc(it.hash) + '" class="' + sel.trim() + '">' +
-        '<td><div class="key mono">' + esc(it.hashPrefix) + '</div><div class="sub mono">' + esc(it.hash.slice(8, 16)) + '…</div></td>' +
+        '<td>' + keyCell + '</td>' +
         '<td><span class="pill ' + st.cls + '">' + st.label + '</span></td>' +
         '<td><span class="tag">' + type.label + '</span></td>' +
         '<td class="col-expire">' + (it.type === 'lifetime' ? '<span class="muted">永久</span>' : fmtDate(it.expiresAt)) + '</td>' +
@@ -729,12 +959,23 @@
     var isUnused = it.status === 'unused';
     var isLifetime = it.type === 'lifetime';
 
-    $('dTitle').textContent = it.hashPrefix;
-    $('dSub').innerHTML = '<span class="pill ' + st.cls + '">' + st.label + '</span> <span class="tag">' + type.label + '</span>';
+    var plain = plainOf(it);
+    $('dTitle').textContent = plain || hashTag(it);
+    $('dTitle').style.fontSize = plain ? '13.5px' : '';
+    $('dSub').innerHTML = '<span class="pill ' + st.cls + '">' + st.label + '</span> <span class="tag">' + type.label + '</span>' +
+      (plain ? ' <span class="tag mono">' + esc(hashTag(it)) + '</span>' : '');
 
     var html = '';
     html += '<dl class="kv">';
-    html += '<dt>完整 hash</dt><dd class="mono" style="font-size:12px;color:#475569">' + esc(it.hash) + '</dd>';
+    // 原始卡密（主）：有明文就展示并支持复制；没有就给导入入口
+    html += '<dt>原始卡密</dt><dd>' + (plain
+      ? '<div class="keybox"><span class="v mono">' + esc(plain) + '</span>' +
+        '<button class="btn sm" data-copy="' + esc(plain) + '">复制</button></div>'
+      : '<div class="keybox warn"><span class="v" style="font-weight:400;color:#8a6b2f">未导入明文，只能看到 hash</span>' +
+        '<button class="btn sm" id="btnOpenKeymap">导入</button></div>') + '</dd>';
+    // hash（副标识）：完整 64 位，方便对接口和日志
+    html += '<dt>Hash</dt><dd><div class="keybox"><span class="v mono full">' + esc(it.hash) + '</span>' +
+      '<button class="btn sm" data-copy="' + esc(it.hash) + '">复制</button></div></dd>';
     html += '<dt>到期时间</dt><dd>' + (isLifetime ? '永久有效' : (it.expiresAt ? fmtDate(it.expiresAt) : '-')) + '</dd>';
     html += '<dt>剩余</dt><dd>' + (isUnused ? '-' : daysText(it)) + '</dd>';
     html += '<dt>激活时间</dt><dd>' + fmtDate(it.activatedAt) + '</dd>';
@@ -837,7 +1078,10 @@
         var ad = a.daysLeft === null || a.daysLeft === undefined ? 99999 : a.daysLeft;
         var bd = b.daysLeft === null || b.daysLeft === undefined ? 99999 : b.daysLeft;
         if (ad !== bd) return ad - bd;
-        return String(a.hashPrefix).localeCompare(String(b.hashPrefix));
+        // 有明文时按卡密原文排，方便和本地密钥清单逐行对照
+        var ak = plainOf(a) || String(a.hashPrefix || '');
+        var bk = plainOf(b) || String(b.hashPrefix || '');
+        return ak.localeCompare(bk);
       });
       state.summary = d.summary || { total: state.items.length };
       if (state.selected) {
@@ -875,6 +1119,7 @@
     if (!t || !state.selected) return;
     var it = state.selected;
 
+    if (t.id === 'btnOpenKeymap') { openKeymap(); return; }
     if (t.id === 'btnSaveNote') {
       var note = $('noteInput').value.trim();
       withBusy(state.provider.setNote(it.hash, note), '备注已保存');
@@ -957,6 +1202,94 @@
     $('settings').classList.add('show');
   }
   $('btnSettings').addEventListener('click', openSettings);
+
+  /* ---- 明文清单：导入 / 合并 / 清空 ---- */
+  function keymapStatusText() {
+    var n = KeyMap.size();
+    var matched = state.items.filter(function (i) { return KeyMap.get(i.hash); }).length;
+    var total = state.items.length;
+    if (!n) {
+      return '还没导入明文。服务端只存 hash，导入后下面的卡才会显示 KL- 开头的原始卡密。';
+    }
+    var s = '已载入 <b>' + n + '</b> 张明文；当前列表 ' + total + ' 张，其中 <b>' + matched + '</b> 张匹配到原始卡密。';
+    if (total && matched < total) s += '其余 ' + (total - matched) + ' 张不在你导入的清单里，仍以 hash 显示。';
+    return s;
+  }
+  function openKeymap() {
+    $('kmStatus').innerHTML = keymapStatusText();
+    $('kmText').value = '';
+    $('kmFile').value = '';
+    $('keymapDlg').classList.add('show');
+  }
+  function closeKeymap() { $('keymapDlg').classList.remove('show'); }
+
+  $('btnKeymap').addEventListener('click', openKeymap);
+  $('btnKmCancel').addEventListener('click', closeKeymap);
+  $('keymapDlg').addEventListener('click', function (ev) {
+    if (ev.target === $('keymapDlg')) closeKeymap();
+  });
+
+  $('kmFile').addEventListener('change', function (ev) {
+    var f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      // 读进文本框而不是直接导入，让你先确认内容
+      $('kmText').value = String(reader.result || '');
+      toast('已读取 ' + f.name + '，确认后点「解析并合并」');
+    };
+    reader.onerror = function () { toast('读文件失败', 'err'); };
+    reader.readAsText(f, 'utf-8');
+  });
+
+  $('btnKmImport').addEventListener('click', function () {
+    var text = $('kmText').value.trim();
+    if (!text) { toast('先选文件或粘贴卡密', 'err'); return; }
+    var btn = $('btnKmImport');
+    btn.disabled = true;
+    btn.textContent = '解析中…';
+    ingestKeymap(text).then(function (r) {
+      var added = r.paired + r.computed;
+      if (added) {
+        toast('已建立 ' + added + ' 组对应' + (r.duplicate ? '，' + r.duplicate + ' 组重复' : ''), 'ok');
+        closeKeymap();
+      } else {
+        toast('没有新增对应，确认卡密格式是 KL-xxxxxx-xxxxxx-xxxxxx', 'err');
+      }
+      renderKeymapBadge();
+      renderRows();
+      renderDrawer();
+    }).catch(function (e) {
+      toast(e.message || '导入失败', 'err');
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = '解析并合并';
+    });
+  });
+
+  $('btnKmClear').addEventListener('click', function () {
+    if (!KeyMap.size()) { toast('还没导入任何明文'); return; }
+    if (!confirm('清空本浏览器保存的 ' + KeyMap.size() + ' 组明文对应？服务端数据不受影响。')) return;
+    KeyMap.clear();
+    renderKeymapBadge();
+    renderRows();
+    renderDrawer();
+    $('kmStatus').innerHTML = keymapStatusText();
+    toast('已清空明文清单', 'ok');
+  });
+
+  /* 复制：列表里的卡密、抽屉里的卡密 / hash 都走这里。
+     用捕获阶段 + stopPropagation，避免顺带把详情抽屉点开。 */
+  document.addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('[data-copy]');
+    if (!t) return;
+    ev.stopPropagation();
+    copyText(t.dataset.copy).then(function () {
+      toast('已复制：' + t.dataset.copy);
+    }).catch(function () {
+      toast('复制失败，请手动选择文本', 'err');
+    });
+  }, true);
   $('settings').addEventListener('click', function (ev) {
     if (ev.target === $('settings')) $('settings').classList.remove('show');
   });
@@ -993,7 +1326,8 @@
 
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape') {
-      if ($('settings').classList.contains('show')) $('settings').classList.remove('show');
+      if ($('keymapDlg').classList.contains('show')) closeKeymap();
+      else if ($('settings').classList.contains('show')) $('settings').classList.remove('show');
       else if (state.selected) closeDrawer();
       return;
     }
@@ -1006,6 +1340,8 @@
   /* ============================================================
    * 7. 启动
    * ============================================================ */
+  KeyMap.load();
+  renderKeymapBadge();
   initProvider();
   // 同源部署时默认尝试真实接口：只有存过令牌才会走 http
   load().then(function () {
