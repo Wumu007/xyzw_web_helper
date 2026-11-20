@@ -2,10 +2,12 @@
  * Cloudflare Pages 高级模式入口（构建时由 vite 插件 copy-worker 复制到 dist/_worker.js）
  *
  * 职责：
- *  1. POST /api/verify-key   卡密验证（一次性消耗 + 激活起算 + 同设备幂等恢复）
- *  2. /api/admin/*           运营接口（激活列表 / 换绑），需 ADMIN_TOKEN，未配置则整体 404
- *  3. /api/hortor*, /api/weixin*  代理（可选 Origin 白名单）
- *  4. 其余请求交给 env.ASSETS 静态资源
+ *  1. POST /api/verify-key   卡密验证（一次性消耗 + 激活起算 + 同设备幂等恢复 + 停用拦截）
+ *  2. POST /api/check        客户端心跳复核（让延期/停用/换绑能作用于已激活设备）
+ *  3. /api/admin/*           运营接口（keys 全量状态 / activations 激活列表 / rebind 换绑与延期 /
+ *                            revoke 停用 / unrevoke 撤销停用），需 ADMIN_TOKEN，未配置则整体 404
+ *  4. /api/hortor*, /api/weixin*  代理（可选 Origin 白名单）
+ *  5. 其余请求交给 env.ASSETS 静态资源
  *
  * 环境变量（Cloudflare Pages → 设置 → 环境变量）：
  *  - ACCESS_KV               KV 命名空间绑定（必需，缺失时激活接口返回 503，前端降级本机模式）
@@ -28,6 +30,7 @@ const DURATIONS_DAYS = {
 const PROBE_KEY = "__healthcheck_probe__";
 const KEY_LIST_PATH = "/access-keys.json";
 const USED_PREFIX = "used:";
+const REVOKED_PREFIX = "revoked:";
 const MAX_BODY_BYTES = 4096;
 
 /** 代理接口默认放行的来源：null（file:// 与部分 WebView）、本机调试、安卓壳、本项目预览域 */
@@ -103,6 +106,33 @@ function recordMetadata(record) {
   };
 }
 
+/**
+ * 消耗记录的 put 选项：metadata 用于列表快速读取，TTL 必须跟着 expiresAt 走。
+ * 延期/缩短/改永久后都要重新算 TTL——否则会出现「卡还能用但 KV 记录已被清掉」，
+ * 清掉之后该卡会退回未使用状态，等于白送一张。
+ */
+/** 停用标记：存在即视为作废。与 used: 分开存，删掉标记即可恢复（不必重建消耗记录） */
+async function isRevoked(kv, hash) {
+  try {
+    return Boolean(await kv.get(REVOKED_PREFIX + hash));
+  } catch {
+    // 读失败不能当成「已停用」（否则 KV 抖动会把所有用户锁在门外）
+    return false;
+  }
+}
+
+function usagePutOptions(record) {
+  const options = { metadata: recordMetadata(record) };
+  if (record.expiresAt) {
+    const remaining = Math.ceil(
+      (new Date(record.expiresAt).getTime() - Date.now()) / 1000,
+    );
+    // 记录保留到到期后 1 天；KV 最小 TTL 60s
+    options.expirationTtl = Math.max(60, remaining + 86400);
+  }
+  return options;
+}
+
 async function handleVerifyKey(request, env) {
   const declaredLength = Number(request.headers.get("content-length") || 0);
   if (declaredLength > MAX_BODY_BYTES) {
@@ -154,6 +184,11 @@ async function handleVerifyKey(request, env) {
     return json({ ok: false, reason: "invalid" });
   }
 
+  // 停用优先于一切：作废的卡不能再激活、不能幂等恢复、不能续期
+  if (await isRevoked(kv, hash)) {
+    return json({ ok: false, reason: "revoked" });
+  }
+
   const usedKey = USED_PREFIX + hash;
   const used = await kv.get(usedKey);
   if (used) {
@@ -203,17 +238,8 @@ async function handleVerifyKey(request, env) {
     activatedAt: activatedAt.toISOString(),
     expiresAt,
   };
-  const options = { metadata: recordMetadata(record) };
 
-  if (expiresAt) {
-    const ttl = Math.ceil(
-      (new Date(expiresAt).getTime() - activatedAt.getTime()) / 1000,
-    );
-    // 消耗记录保留到到期后 1 天；KV 最小 TTL 60s
-    options.expirationTtl = Math.max(60, ttl + 86400);
-  }
-
-  await kv.put(usedKey, JSON.stringify(record), options);
+  await kv.put(usedKey, JSON.stringify(record), usagePutOptions(record));
 
   return json({
     ok: true,
@@ -304,10 +330,29 @@ async function scanUsage(kv) {
   return { ok: true, byHash };
 }
 
+/** 扫出全部停用标记（revoked:<hash>）。读失败按「没有停用」处理，避免误锁。 */
+async function scanRevoked(kv) {
+  const set = new Set();
+  let cursor;
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const page = await kv.list({ prefix: REVOKED_PREFIX, limit: 1000, cursor });
+      for (const entry of page.keys) {
+        set.add(entry.name.slice(REVOKED_PREFIX.length));
+      }
+      if (page.list_complete) break;
+      cursor = page.cursor;
+    }
+  } catch {
+    return new Set();
+  }
+  return set;
+}
+
 /**
  * GET /api/admin/activations —— 已激活/已用掉的卡（只含被用过的记录）
  */
-
 async function handleAdminActivations(request, env, url) {
   const denied = guardAdmin(request, url, env);
   if (denied) return denied;
@@ -335,17 +380,18 @@ async function handleAdminActivations(request, env, url) {
   return json({ ok: true, count: items.length, items });
 }
 
-const STATUS_ORDER = { active: 0, expired: 1, unused: 2 };
+const STATUS_ORDER = { revoked: 0, active: 1, expired: 2, unused: 3 };
 
 /**
- * GET /api/admin/keys —— 全量卡密状态（清单里每一张卡 + 它现在有没有被用掉）
+ * GET /api/admin/keys —— 全量卡密状态（清单里每一张卡 + 它现在处于什么状态）
  *
  * 与 `/activations` 的区别：那个只看 KV 里「被用过的」，没激活的卡完全不在结果里，
  * 所以没法回答「我卖出去/生成了 55 张，还剩几张没用」。这个接口以清单为基准做左右合并：
+ *   revoked 已停用（手动作废，优先级最高）
  *   unused  未使用（KV 里没有记录）
  *   active  已激活且未到期
  *   expired 已激活但已过期
- * 只输出 hash 前缀，不输出完整哈希以外的任何敏感信息；明文本身服务端从来没有过。
+ * 只输出 hash 前缀，不输出明文；明文本身服务端从来没有过。
  */
 async function handleAdminKeys(request, env, url) {
   const denied = guardAdmin(request, url, env);
@@ -367,13 +413,16 @@ async function handleAdminKeys(request, env, url) {
     return json({ ok: false, reason: "kv_list_failed", message: scanned.message }, 502);
   }
 
+  const revoked = await scanRevoked(kv);
   const now = Date.now();
   const manifestHashes = new Set(list.map((e) => e.hash));
   const items = list.map((entry) => {
     const hash = String(entry.hash || "");
     const used = scanned.byHash.get(hash) || null;
     let status = "unused";
-    if (used) {
+    if (revoked.has(hash)) {
+      status = "revoked";
+    } else if (used) {
       const expiredByTime = used.expiresAt
         ? new Date(used.expiresAt).getTime() <= now
         : false;
@@ -393,7 +442,14 @@ async function handleAdminKeys(request, env, url) {
     };
   });
 
-  const summary = { total: items.length, unused: 0, active: 0, expired: 0, byType: {} };
+  const summary = {
+    total: items.length,
+    unused: 0,
+    active: 0,
+    expired: 0,
+    revoked: 0,
+    byType: {},
+  };
   for (const item of items) {
     summary[item.status] += 1;
     const bucket = (summary.byType[item.type] ||= {
@@ -401,6 +457,7 @@ async function handleAdminKeys(request, env, url) {
       unused: 0,
       active: 0,
       expired: 0,
+      revoked: 0,
     });
     bucket.total += 1;
     bucket[item.status] += 1;
@@ -495,17 +552,27 @@ async function handleAdminRebind(request, env, url) {
     }
   }
 
-  const options = { metadata: recordMetadata(record) };
-  let ttl = null;
-  if (record.expiresAt) {
-    const remaining = Math.ceil(
-      (new Date(record.expiresAt).getTime() - Date.now()) / 1000,
-    );
-    ttl = Math.max(60, remaining + 86400);
-    options.expirationTtl = ttl;
+  // 延期 / 缩短：以 max(现在, 原到期) 为基准加天数。
+  // 用 max 而不是直接用原到期，是为了让「已过期再续费」得到完整的天数，
+  // 而不是被已过期的那几天先扣掉。
+  if (body?.extendDays !== undefined && body?.extendDays !== null) {
+    if (Object.hasOwn(body, "expiresAt")) {
+      return json({ ok: false, reason: "conflict_expires_at" }, 400);
+    }
+    const days = Number(body.extendDays);
+    if (!Number.isFinite(days) || days === 0 || Math.abs(days) > 3650) {
+      return json({ ok: false, reason: "bad_extend_days" }, 400);
+    }
+    if (!record.expiresAt) {
+      // 终身卡没有到期时间可延，改短也没有意义
+      return json({ ok: false, reason: "already_lifetime" }, 409);
+    }
+    const base = Math.max(Date.now(), new Date(record.expiresAt).getTime());
+    record.expiresAt = new Date(base + days * 86400000).toISOString();
   }
 
-  await kv.put(usedKey, JSON.stringify(record), options);
+  await kv.put(usedKey, JSON.stringify(record), usagePutOptions(record));
+
   return json({
     ok: true,
     hash,
@@ -514,6 +581,165 @@ async function handleAdminRebind(request, env, url) {
     activatedAt: record.activatedAt ?? null,
     expiresAt: record.expiresAt ?? null,
     expired: record.expiresAt ? new Date(record.expiresAt).getTime() < Date.now() : false,
+  });
+}
+
+/**
+ * POST /api/admin/revoke —— 停用作废
+ *
+ * 与「删掉 used: 记录」的区别：删记录只会让卡回到未使用状态（等于白送），
+ * 所以停用单独写 revoked:<hash> 标记，不设 TTL（作废是永久的，直到 unrevoke）。
+ * 停用优先于 used 判断：已激活的卡也会在下一次校验时被拒。
+ */
+async function handleAdminRevoke(request, env, url) {
+  const denied = guardAdmin(request, url, env);
+  if (denied) return denied;
+  if (request.method !== "POST") {
+    return json({ ok: false, reason: "method_not_allowed" }, 405);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const key = String(body?.key || "").trim();
+  const hashInput = String(body?.hash || "").trim().toLowerCase();
+  if (!key && !/^[0-9a-f]{64}$/.test(hashInput)) {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const kv = env?.ACCESS_KV;
+  if ((await checkKv(kv)) !== "ok") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
+  const hash = key ? await sha256Hex(key) : hashInput;
+  const reason = String(body?.reason || "").slice(0, 200);
+  await kv.put(
+    REVOKED_PREFIX + hash,
+    JSON.stringify({ at: new Date().toISOString(), reason }),
+  );
+
+  return json({ ok: true, hash, revoked: true, reason: reason || null });
+}
+
+/** POST /api/admin/unrevoke —— 撤销停用（删除标记，卡恢复原有状态） */
+async function handleAdminUnrevoke(request, env, url) {
+  const denied = guardAdmin(request, url, env);
+  if (denied) return denied;
+  if (request.method !== "POST") {
+    return json({ ok: false, reason: "method_not_allowed" }, 405);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const key = String(body?.key || "").trim();
+  const hashInput = String(body?.hash || "").trim().toLowerCase();
+  if (!key && !/^[0-9a-f]{64}$/.test(hashInput)) {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const kv = env?.ACCESS_KV;
+  if ((await checkKv(kv)) !== "ok") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
+  const hash = key ? await sha256Hex(key) : hashInput;
+  await kv.delete(REVOKED_PREFIX + hash);
+  return json({ ok: true, hash, revoked: false });
+}
+
+/**
+ * POST /api/check —— 客户端心跳 / 重新校验（不是管理接口，前端每次启动会调一次）
+ *
+ * 为什么需要它：本项目的访问控制是「激活时校验一次，之后凭本地记录用到到期」。
+ * 这带来一个副作用——你在服务端延期、停用、换绑，**已激活的设备感知不到**，
+ * 要等它本地到期或清缓存重输才会重新问服务端。
+ *
+ * 这里用 hash + deviceId 做轻量复核，不重复传明文：
+ *   active   正常（顺带下发最新 expiresAt，延期即时生效）
+ *   expired  已过期
+ *   revoked  已停用
+ *   rebound  已换绑到别的设备（原设备应退出）
+ *   unbound  KV 里没有消耗记录（记录被清或未激活）
+ *
+ * 前端约定：只有明确拿到 revoked / expired / rebound 才锁回门禁；
+ * unbound、unknown、网络失败、503 一律保持本地记录（fail-open），
+ * 避免 KV 抖动或断网把付过费的正常用户锁在门外。
+ */
+async function handleCheck(request, env) {
+  if (request.method !== "POST") {
+    return json({ ok: false, reason: "method_not_allowed" }, 405);
+  }
+
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (declaredLength > MAX_BODY_BYTES) {
+    return json({ ok: false, reason: "payload_too_large" }, 413);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const hash = String(body?.hash || "").trim().toLowerCase();
+  const deviceId = String(body?.deviceId || "").slice(0, 64);
+  if (!/^[0-9a-f]{64}$/.test(hash) || !deviceId) {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+
+  const kv = env?.ACCESS_KV;
+  if ((await checkKv(kv)) !== "ok") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
+  const origin = new URL(request.url).origin;
+  const { ok: listOk, list } = await loadKeyList(env, origin);
+  if (!listOk) {
+    return json({ ok: false, reason: "config_unavailable" }, 503);
+  }
+  if (!list.some((item) => item && item.hash === hash)) {
+    return json({ ok: false, reason: "invalid" });
+  }
+
+  if (await isRevoked(kv, hash)) {
+    return json({ ok: true, status: "revoked" });
+  }
+
+  let record = null;
+  try {
+    const raw = await kv.get(USED_PREFIX + hash);
+    if (raw) record = JSON.parse(raw);
+  } catch {
+    return json({ ok: true, status: "unknown" });
+  }
+
+  if (!record) {
+    return json({ ok: true, status: "unbound" });
+  }
+  if (record.deviceId && record.deviceId !== deviceId) {
+    return json({ ok: true, status: "rebound" });
+  }
+  if (record.expiresAt && Date.now() > new Date(record.expiresAt).getTime()) {
+    return json({ ok: true, status: "expired", expiresAt: record.expiresAt });
+  }
+
+  return json({
+    ok: true,
+    status: "active",
+    type: record.type ?? null,
+    activatedAt: record.activatedAt ?? null,
+    expiresAt: record.expiresAt ?? null,
   });
 }
 
@@ -609,6 +835,11 @@ export default {
       return handleVerifyKey(request, env);
     }
 
+    // ===== 客户端心跳 / 重新校验（非管理接口，前端启动时调）=====
+    if (url.pathname === "/api/check") {
+      return handleCheck(request, env);
+    }
+
     // ===== 运营接口（未配置 ADMIN_TOKEN 时整体 404）=====
     if (url.pathname.startsWith("/api/admin/")) {
       if (url.pathname === "/api/admin/activations") {
@@ -622,6 +853,12 @@ export default {
           return json({ ok: false, reason: "method_not_allowed" }, 405);
         }
         return handleAdminKeys(request, env, url);
+      }
+      if (url.pathname === "/api/admin/revoke") {
+        return handleAdminRevoke(request, env, url);
+      }
+      if (url.pathname === "/api/admin/unrevoke") {
+        return handleAdminUnrevoke(request, env, url);
       }
       if (url.pathname === "/api/admin/rebind") {
         return handleAdminRebind(request, env, url);

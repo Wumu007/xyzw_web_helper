@@ -625,6 +625,228 @@ describe("管理接口", () => {
     assert.equal(res.status, 404);
     assert.equal((await res.json()).reason, "not_activated");
   });
+
+  // ---- 停用 / 撤销停用 ----
+  const adminPost = (env, path, body) =>
+    worker.fetch(
+      new Request(`${SITE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+
+  test("停用后：即使同设备原密钥也返回 revoked（优先于幂等恢复）", async () => {
+    const { env } = await seedActivation();
+    const res = await adminPost(env, "/api/admin/revoke", { key: WEEK_KEY, reason: "退款" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.revoked, true);
+    assert.equal(body.reason, "退款");
+
+    const again = await callVerify(env, { key: WEEK_KEY, deviceId: "device-a" });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.ok, false);
+    assert.equal(again.body.reason, "revoked");
+  });
+
+  test("撤销停用后恢复原有权益（仍返回原有效期，不重新计时）", async () => {
+    const { env } = await seedActivation();
+    await adminPost(env, "/api/admin/revoke", { key: WEEK_KEY });
+    const undo = await adminPost(env, "/api/admin/unrevoke", { key: WEEK_KEY });
+    assert.equal((await undo.json()).revoked, false);
+
+    const again = await callVerify(env, { key: WEEK_KEY, deviceId: "device-a" });
+    assert.equal(again.body.ok, true);
+    assert.equal(again.body.resumed, true);
+  });
+
+  test("停用不消耗 KV 的 used 记录：撤销后无需重新激活", async () => {
+    const { env, kv } = await seedActivation();
+    const hash = await sha256(WEEK_KEY);
+    await adminPost(env, "/api/admin/revoke", { key: WEEK_KEY });
+    assert.ok(kv.store.has(`used:${hash}`), "used 记录应保留");
+    assert.ok(kv.store.has(`revoked:${hash}`), "停用标记应写入");
+    await adminPost(env, "/api/admin/unrevoke", { key: WEEK_KEY });
+    assert.ok(kv.store.has(`used:${hash}`), "撤销停用后 used 记录仍在");
+    assert.equal(kv.store.has(`revoked:${hash}`), false);
+  });
+
+  test("全量状态里停用的卡显示为 revoked，且计入 summary", async () => {
+    const { env } = await seedActivation();
+    await adminPost(env, "/api/admin/revoke", { key: WEEK_KEY });
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      env,
+    );
+    const body = await res.json();
+    const week = body.items.find((x) => x.type === "week");
+    assert.equal(week.status, "revoked");
+    assert.equal(body.summary.revoked, 1);
+    assert.equal(body.summary.active, 0);
+  });
+
+  // ---- 延期 ----
+  test("延期 30 天：到期时间顺延，KV TTL 同步变长", async () => {
+    const { env, kv } = await seedActivation();
+    const hash = await sha256(WEEK_KEY);
+    const before = JSON.parse(kv.store.get(`used:${hash}`).value).expiresAt;
+
+    const res = await adminPost(env, "/api/admin/rebind", { key: WEEK_KEY, extendDays: 30 });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const delta = (new Date(body.expiresAt) - new Date(before)) / DAY_MS;
+    assert.equal(Math.round(delta), 30);
+
+    // TTL 也要跟着走，否则记录会被提前清掉，卡就变成「未使用」白送了
+    const ttlDays = (kv.store.get(`used:${hash}`).expiration * 1000 - Date.now()) / DAY_MS;
+    assert.ok(ttlDays > 30, `TTL 应超过 30 天，实际 ${ttlDays.toFixed(1)} 天`);
+  });
+
+  test("已过期的卡续期：从当前时间起算完整天数，不吃亏", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    const hash = await sha256(WEEK_KEY);
+    const expiredAt = new Date(Date.now() - 10 * DAY_MS).toISOString();
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({ deviceId: "device-a", type: "week", activatedAt: expiredAt, expiresAt: expiredAt }),
+      { metadata: { type: "week", deviceId: "device-a", activatedAt: expiredAt, expiresAt: expiredAt } },
+    );
+
+    const res = await adminPost(env, "/api/admin/rebind", { key: WEEK_KEY, extendDays: 30 });
+    const body = await res.json();
+    const left = (new Date(body.expiresAt) - Date.now()) / DAY_MS;
+    assert.ok(left > 29.9, `应还剩约 30 天，实际 ${left.toFixed(2)} 天`);
+  });
+
+  test("终身卡不接受延期（没有到期时间可延）", async () => {
+    const { env } = await seedActivation();
+    await adminPost(env, "/api/admin/rebind", { key: LIFE_KEY, expiresAt: null });
+    await callVerify(env, { key: LIFE_KEY, deviceId: "device-life" });
+    const res = await adminPost(env, "/api/admin/rebind", { key: LIFE_KEY, extendDays: 30 });
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).reason, "already_lifetime");
+  });
+
+  test("extendDays 与 expiresAt 同时传：拒绝，避免语义打架", async () => {
+    const { env } = await seedActivation();
+    const res = await adminPost(env, "/api/admin/rebind", {
+      key: WEEK_KEY,
+      extendDays: 30,
+      expiresAt: null,
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).reason, "conflict_expires_at");
+  });
+});
+
+describe("客户端心跳 /api/check", () => {
+  async function seed() {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv });
+    const hash = await sha256(WEEK_KEY);
+    return { env, kv, hash };
+  }
+
+  const check = (env, body) =>
+    worker.fetch(
+      new Request(`${SITE}/api/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+
+  test("正常激活的卡返回 active 与最新有效期", async () => {
+    const { env, hash } = await seed();
+    await callVerify(env, { key: WEEK_KEY, deviceId: "dev-1" });
+    const body = await (await check(env, { hash, deviceId: "dev-1" })).json();
+    assert.equal(body.ok, true);
+    assert.equal(body.status, "active");
+    assert.equal(body.type, "week");
+    assert.ok(body.expiresAt);
+  });
+
+  test("延期后心跳能拿到新有效期（这是「延期即时生效」的关键）", async () => {
+    const { env, kv, hash } = await seed();
+    await callVerify(env, { key: WEEK_KEY, deviceId: "dev-1" });
+    const before = JSON.parse(kv.store.get(`used:${hash}`).value).expiresAt;
+    await worker.fetch(
+      new Request(`${SITE}/api/admin/rebind`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer admin-token-for-test" },
+        body: JSON.stringify({ key: WEEK_KEY, extendDays: 7 }),
+      }),
+      { ...env, ADMIN_TOKEN: "admin-token-for-test" },
+    );
+    const body = await (await check(env, { hash, deviceId: "dev-1" })).json();
+    assert.ok(new Date(body.expiresAt) > new Date(before));
+  });
+
+  test("停用的卡心跳返回 revoked", async () => {
+    const { env, hash } = await seed();
+    await callVerify(env, { key: WEEK_KEY, deviceId: "dev-1" });
+    await env.ACCESS_KV.put(`revoked:${hash}`, JSON.stringify({ at: new Date().toISOString() }));
+    const body = await (await check(env, { hash, deviceId: "dev-1" })).json();
+    assert.equal(body.status, "revoked");
+  });
+
+  test("换绑后原设备心跳返回 rebound", async () => {
+    const { env, hash } = await seed();
+    await callVerify(env, { key: WEEK_KEY, deviceId: "dev-old" });
+    await env.ACCESS_KV.put(
+      `used:${hash}`,
+      JSON.stringify({
+        deviceId: "dev-new",
+        type: "week",
+        activatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 7 * DAY_MS).toISOString(),
+      }),
+      { metadata: { type: "week", deviceId: "dev-new" } },
+    );
+    const body = await (await check(env, { hash, deviceId: "dev-old" })).json();
+    assert.equal(body.status, "rebound");
+  });
+
+  test("过期的卡心跳返回 expired", async () => {
+    const { env, kv, hash } = await seed();
+    const past = new Date(Date.now() - DAY_MS).toISOString();
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({ deviceId: "dev-1", type: "week", activatedAt: past, expiresAt: past }),
+      { metadata: { type: "week", deviceId: "dev-1", activatedAt: past, expiresAt: past } },
+    );
+    const body = await (await check(env, { hash, deviceId: "dev-1" })).json();
+    assert.equal(body.status, "expired");
+  });
+
+  test("KV 里没有记录时返回 unbound（前端应保持本地，不锁人）", async () => {
+    const { env, hash } = await seed();
+    const body = await (await check(env, { hash, deviceId: "dev-1" })).json();
+    assert.equal(body.status, "unbound");
+  });
+
+  test("清单里没有的 hash 直接判 invalid", async () => {
+    const { env } = await seed();
+    const body = await (await check(env, { hash: "a".repeat(64), deviceId: "dev-1" })).json();
+    assert.equal(body.ok, false);
+    assert.equal(body.reason, "invalid");
+  });
+
+  test("KV 不可用返回 503，让前端走 fail-open", async () => {
+    const { env, hash } = await seed();
+    const res = await check({ ...env, ACCESS_KV: null }, { hash, deviceId: "dev-1" });
+    assert.equal(res.status, 503);
+  });
+
+  test("参数非法返回 400", async () => {
+    const { env } = await seed();
+    assert.equal((await check(env, { hash: "short", deviceId: "d" })).status, 400);
+    assert.equal((await check(env, { hash: "a".repeat(64) })).status, 400);
+  });
 });
 
 describe("代理接口来源校验", () => {

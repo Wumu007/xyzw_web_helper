@@ -178,6 +178,8 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 10. **代理来源校验只拦浏览器跨站**：带 `Origin` 的非本站请求返回 403，但 curl / 原生客户端（无 `Origin`）无法拦；这是刻意的，否则安卓壳会被误杀。
 11. **管理接口没有审计与限流**：`/api/admin/*` 只有单令牌校验，谁拿到令牌就是全权限（可读激活列表、可换绑）。令牌只放 Pages 环境变量，不写进代码与仓库。
 12. **历史多份 worker 副本已清理**：`functions/api/verify-key.js`（Pages Functions 版）与 `worker/index.js`（wrangler 版）都是早期实现，在高级模式下**永远不会被执行**，却正是「改了接口不生效」类误判的根源，已随本次改动删除。本地安卓壳工程另有一份 `_worker.js`（不在本仓库），不会随本仓库 `worker.js` 自动更新。
+13. **停用 / 延期的生效有延迟**：已激活设备靠本地记录 + 「最多 6 小时一次」的心跳复核，且断网/KV 抖动时 fail-open（保持本地可用）。所以「停用」不是即时封禁——用户不重启 App 的话最多滞后 6 小时；这也意味着懂技术的人可以靠断网继续使用本地记录（与第 8 条同源）。
+14. **心跳是新增的网络依赖**：启动时多一次 `POST /api/check`。已做成异步、不阻塞首屏、8 秒超时、失败不锁人，但仍属「多一个可能失败的环节」；出问题用 `HEARTBEAT_ENABLED = false` 重新部署即可整体关闭。
 
 ---
 
@@ -259,4 +261,94 @@ curl -s -X POST "https://<站点>/api/admin/rebind" \
 2. 确认是本人在换设备（看订单/沟通），**不要直接发新卡**；
 3. 调 `rebind` 把 deviceId 改成新设备的 ID（新设备 ID 可以在报错时的 `dev:...` 里看到，或让用户从 `/api/admin/activations` 对照）；
 4. 让用户重新输入原密钥，服务端返回 `resumed` 与原有效期，**不重新计时**。
+
+---
+
+## 九、日常运维：加卡 / 延期 / 停用 / 换绑
+
+### 0. 先看这张表
+
+| 想做什么 | 用什么 | 多久生效 |
+|---|---|---|
+| 加新卡 | `scripts/keygen.mjs` 生成 → push | 约 1 分钟（Pages 重建完） |
+| 延期 / 缩短 | `POST /api/admin/rebind` + `extendDays` | 用户下次打开 App（启动时复核，最多 6 小时） |
+| 停用（作废） | `POST /api/admin/revoke` | 同上；未激活的卡立即拒绝 |
+| 撤销停用 | `POST /api/admin/unrevoke` | 同上 |
+| 换绑设备 | `POST /api/admin/rebind` + `deviceId` | 旧设备下次复核即被踢 |
+| 直接改到期日 | `POST /api/admin/rebind` + `expiresAt` | 同上 |
+
+**为什么不是「立即」**：见本节第 5 条。已激活的设备平时只靠本地记录，不会每次打开都问服务端。
+
+### 1. 加卡（生成新的密钥）
+
+```powershell
+cd <仓库目录>
+node scripts/keygen.mjs --type week --count 10   # 类型：week/month/quarter/year/lifetime
+node scripts/keygen.mjs --check                  # 体检：两份清单是否一致、有无重复
+git add public/access-keys.json src/config/access-keys.json
+git commit -m "feat(keys): 新增 10 张周卡"
+git push
+```
+
+- 一次生成多少张都行（1~500），明文写到 `keys/<类型>-<日期>.txt`（`keys/` 已被 `.gitignore` 忽略）。
+- **两份清单必须一起改**：`public/access-keys.json` 是 Worker 服务端校验用的，`src/config/access-keys.json` 是前端断网降级用的。脚本会同时写，不要手工只改一个——只改一个的后果是「服务端认、断网时不认」。
+- 想先看看会生成什么：加 `--dry-run`，只打印不落盘。
+- 推送后 Cloudflare Pages 自动重建，`verify-dist.mjs` 会校验清单非空且每条 hash 合法。
+
+### 2. 延期 / 缩短
+
+```powershell
+$h = @{ Authorization = "Bearer 你的令牌" }
+$b = @{ key = "KL-aaaaaa-bbbbbb-cccccc"; extendDays = 30 } | ConvertTo-Json
+Invoke-RestMethod "https://xyzw-web-helper-2dx.pages.dev/api/admin/rebind" `
+  -Method Post -Headers $h -ContentType "application/json" -Body $b | Format-List
+```
+
+- `extendDays` 为正 = 延期，为负 = 缩短（如 `-7`）。
+- 基准是 **max(现在, 原到期时间)**：已经过期 10 天的卡续 30 天，会得到完整的 30 天，而不是 20 天。
+- 只对**已激活**的卡有效（未激活的卡有效期从激活时起算，延期没有意义，会返回 `404 not_activated`）。
+- 终身卡不能延（没有到期时间），返回 `409 already_lifetime`。
+- 服务端会同时重算 KV 的 TTL —— 否则会出现「卡还能用但记录已被清掉」，该卡会退回未使用状态，等于白送一张。
+- `extendDays` 与 `expiresAt` 不能同时传（`400 conflict_expires_at`）。
+
+### 3. 停用（作废）/ 撤销停用
+
+```powershell
+# 停用：hash 或明文都行
+$b = @{ hash = "9a043d645591bbd5927111df077c7a1ce4da8f2bc667cf454edffaf0c375ea59"; reason = "退款 2026-11-20" } | ConvertTo-Json
+Invoke-RestMethod "https://xyzw-web-helper-2dx.pages.dev/api/admin/revoke" `
+  -Method Post -Headers $h -ContentType "application/json" -Body $b | Format-List
+
+# 撤销停用（恢复原状态，原有效期不变）
+$b = @{ hash = "9a043d64..." } | ConvertTo-Json
+Invoke-RestMethod "https://xyzw-web-helper-2dx.pages.dev/api/admin/unrevoke" `
+  -Method Post -Headers $h -ContentType "application/json" -Body $b | Format-List
+```
+
+> **不要用「删掉 KV 记录」来停用**。删掉 `used:<hash>` 只会让这张卡回到**未使用**状态，谁拿到明文谁就能重新激活，等于白送。停用是往 KV 写独立的 `revoked:<hash>` 标记（不设过期时间），优先级高于一切：已激活的卡也会被拒。
+
+停用后的表现：
+
+| 场景 | 结果 |
+|---|---|
+| 未激活的卡输入密钥 | `reason: "revoked"`，提示「该密钥已被停用」 |
+| 已激活设备启动 App | 心跳复核返回 `revoked` → 锁回门禁 |
+| `/api/admin/keys` | 状态显示 `revoked`，计入 `summary.revoked` |
+
+### 4. 换绑设备
+
+见第八节「换设备的标准处置流程」。命令同上，把 `extendDays` 换成 `deviceId`。
+
+### 5. 为什么已激活的设备不是「立即」生效
+
+本项目是浏览器内的工具，激活后靠 `localStorage` 里的记录运行，不会每次打开都请求服务端。为了让服务端的变更能传达到已激活设备，前端启动时会调一次 `POST /api/check`（心跳）：
+
+- 最多每 **6 小时**一次（`HEARTBEAT_INTERVAL_MS`，在 `AccessGate.vue` 顶部），避免每次刷新都打接口；
+- 只对 `revoked` / `expired` / `rebound` 三个明确状态**锁回门禁**；
+- **网络失败、超时、503、`unbound`、`unknown` 一律保持本地可用**（fail-open）——宁可放过，也不能因为一次 KV 抖动把所有付费用户挡在门外；
+- 收到 `active` 时会把服务端最新 `expiresAt` 写回本地，**这是「延期」能自动生效的关键**；
+- 逃生阀：把 `HEARTBEAT_ENABLED` 改成 `false` 重新部署，心跳整体停用。
+
+想更快生效（例如刚给某人延期、希望他刷新就看到），让对方清一次缓存，或在浏览器控制台执行 `localStorage.removeItem("xyzw_heartbeat_at")` 后刷新。把间隔调小只需改 `HEARTBEAT_INTERVAL_MS`，代价是请求量上升。
+
 
