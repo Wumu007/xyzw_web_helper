@@ -211,19 +211,31 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 ### 管理接口（需 `Authorization: Bearer <ADMIN_TOKEN>` 或 `X-Admin-Token`）
 
 ```bash
-# 1) 看激活/到期情况（含完整 hash、类型、设备、剩余天数）
+# 1) 全量卡密状态：清单里每一张卡 + 现在是否被用掉（答案类接口，见下表）
+curl -s "https://<站点>/api/admin/keys" -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# 2) 只看已激活/已用掉的卡（含完整 hash、类型、设备、剩余天数）
 curl -s "https://<站点>/api/admin/activations" -H "Authorization: Bearer $ADMIN_TOKEN"
 
-# 2) 换绑：把一张已激活的卡改到新设备（保留原有效期，不重新计时）
+# 3) 换绑：把一张已激活的卡改到新设备（保留原有效期，不重新计时）
 curl -s -X POST "https://<站点>/api/admin/rebind" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"key":"KL-xxxxxx-xxxxxx-xxxxxx","deviceId":"<新设备ID>"}'
 
-# 3) 修复被历史 bug 写成 30 天的终身卡：用 hash 定位，不需要明文卡密
+# 4) 修复被历史 bug 写成 30 天的终身卡：用 hash 定位，不需要明文卡密
 curl -s -X POST "https://<站点>/api/admin/rebind" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"hash":"<activations 返回的 64 位 hash>","expiresAt":null}'
 ```
+
+`keys` 与 `activations` 的分工（**最容易混淆的一点**）：
+
+| 接口 | 基准 | 能回答 | 不能回答 |
+|---|---|---|---|
+| `/api/admin/keys` | 卡密清单（55 条） | 一共多少张、还剩几张没用、每种类型剩多少 | 明文是哪个（服务端只有哈希） |
+| `/api/admin/activations` | KV 里已消耗记录 | 哪张卡被谁在什么时候激活、何时到期 | 还剩几张没用（没用过的根本不在 KV 里） |
+
+`keys` 的 `status` 取值：`unused`（未使用）/ `active`（已激活未到期）/ `expired`（已激活但过期）；另有 `orphan` 字段统计「KV 里有、但清单里已没有」的历史记录数（换批次后会 > 0，属正常）。
 
 `rebind` 的入参约定：
 
@@ -239,7 +251,7 @@ curl -s -X POST "https://<站点>/api/admin/rebind" \
 > 2. **`kvExpiresAt` 不是卡到期时间**。它是 KV 记录自身的过期时间（= 卡到期 + 1 天缓冲），用于核对记录何时被自动清理；卡的真实到期看 `expiresAt`。
 
 > **历史 bug 提醒（2026-11-20 修复）**：`DURATIONS_DAYS[type] ?? 30` 会把 `lifetime` 的 `null` 变成 30 天，导致**终身卡实际只有 30 天**。代码已改为 `Object.hasOwn` 判定并由单测锁死；但**修复前已激活的终身卡，KV 里的到期时间仍是 30 天**，需要用上面的第 3 条逐张修（筛 `type=lifetime` 且 `expiresAt` 不为 `null`）。
-> 修复后用户端不需要做任何事：到期那天客户端会要求重新输入密钥，服务端 `resumed` 会重新写入 `expiresAt: null`，从此永久有效。
+> 修复后**已激活的旧卡需要人工修数据**（上面第 4 条）。若偷懒不修，KV 记录会在「30 天 + 1 天缓冲」后被自动清掉，该卡回到 `unused` 状态，用户重新输入即永久有效——但这意味着中途会有一次「用户以为卡过期了」的投诉，所以建议主动修。
 
 ### 换设备的标准处置流程
 

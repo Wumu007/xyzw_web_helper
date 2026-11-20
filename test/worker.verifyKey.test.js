@@ -346,7 +346,7 @@ describe("管理接口", () => {
 
   test("未配置 ADMIN_TOKEN：接口整体 404（失败关闭）", async () => {
     const { env } = makeEnv({ keys: KEYS });
-    for (const path of ["/api/admin/activations", "/api/admin/rebind"]) {
+    for (const path of ["/api/admin/activations", "/api/admin/keys", "/api/admin/rebind"]) {
       const res = await worker.fetch(
         new Request(`${SITE}${path}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
         env,
@@ -516,6 +516,101 @@ describe("管理接口", () => {
     const resumed = await callVerify(env, { key: WEEK_KEY, deviceId: "device-a" });
     assert.equal(resumed.body.ok, true);
     assert.equal(resumed.body.expiresAt, null);
+  });
+
+  test("全量卡密状态：清单里每张卡都要出现，未激活的算 unused", async () => {
+    const { env } = await seedActivation();
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.summary.total, 2);
+    assert.equal(body.summary.active, 1);
+    assert.equal(body.summary.unused, 1);
+    assert.equal(body.summary.expired, 0);
+    assert.equal(body.summary.byType.week.total, 1);
+    assert.equal(body.summary.byType.lifetime.unused, 1);
+    assert.equal(body.orphan, 0);
+
+    const life = body.items.find((x) => x.type === "lifetime");
+    assert.equal(life.status, "unused");
+    assert.equal(life.deviceId, null);
+    assert.equal(life.deviceId === null, true);
+
+    const week = body.items.find((x) => x.type === "week");
+    assert.equal(week.status, "active");
+    assert.equal(week.deviceId, "device-a");
+    // 未使用排在后面
+    assert.equal(body.items[0].status, "active");
+  });
+
+  test("已过期的卡显示为 expired，而不是 active", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    const hash = await sha256(WEEK_KEY);
+    const past = new Date(Date.now() - 3 * DAY_MS).toISOString();
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({ deviceId: "device-old", type: "week", activatedAt: past, expiresAt: past }),
+      { metadata: { type: "week", deviceId: "device-old", activatedAt: past, expiresAt: past } },
+    );
+
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    const body = await res.json();
+    const week = body.items.find((x) => x.type === "week");
+    assert.equal(week.status, "expired");
+    assert.equal(body.summary.expired, 1);
+    assert.equal(body.summary.active, 0);
+  });
+
+  test("KV 里存在但清单里没有的记录计入 orphan", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    await kv.put(`used:${"f".repeat(64)}`, JSON.stringify({ type: "week", deviceId: "ghost" }), {
+      metadata: { type: "week", deviceId: "ghost", activatedAt: null, expiresAt: null },
+    });
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    const body = await res.json();
+    assert.equal(body.orphan, 1);
+    assert.equal(body.summary.total, 2);
+  });
+
+  test("清单读不到时全量状态返回 503，而不是「全部未使用」", async () => {
+    const { env } = makeEnv({ keys: null, env: { ADMIN_TOKEN: TOKEN } });
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).reason, "config_unavailable");
+  });
+
+  test("全量状态不接受非 GET", async () => {
+    const { env } = await seedActivation();
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/keys`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    assert.equal(res.status, 405);
   });
 
   test("换绑未激活的卡密返回 404", async () => {    const { env } = await seedActivation();

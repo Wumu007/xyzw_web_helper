@@ -244,26 +244,17 @@ function guardAdmin(request, url, env) {
   return null;
 }
 
-/**
- * GET /api/admin/activations —— 激活/到期清单（默认只返回最近 1000 条）
- *
- * 注意：本次改动之前写入的记录**没有 metadata**（旧的 worker 不写），只能从记录值里读。
- * 所以 metadata 缺失时会补一次 kv.get；不能把「metadata 缺失」当成「终身卡」——
- * 早期版本正是这样把 3 张周卡/月卡误显示成 lifetime=true 的。
- */
 const LEGACY_LOOKUP_LIMIT = 200;
 
-async function handleAdminActivations(request, env, url) {
-  const denied = guardAdmin(request, url, env);
-  if (denied) return denied;
-
-  const kv = env?.ACCESS_KV;
-  if ((await checkKv(kv)) !== "ok") {
-    return json({ ok: false, reason: "kv_unavailable" }, 503);
-  }
-
-  const now = Date.now();
-  const items = [];
+/**
+ * 扫描 KV 中全部已消耗记录，返回 hash -> 记录信息 的 Map。
+ *
+ * 注意：早期 worker 写入的记录**没有 metadata**，只能回读记录值拿真实字段。
+ * 不能把「metadata 缺失」当成「终身卡」——旧版本正是这样把周卡/月卡误显示成 lifetime 的。
+ * 回读有次数上限（LEGACY_LOOKUP_LIMIT），避免记录多时把单次请求拖死。
+ */
+async function scanUsage(kv) {
+  const byHash = new Map();
   let legacyLookups = 0;
   let cursor;
   try {
@@ -289,27 +280,18 @@ async function handleAdminActivations(request, env, url) {
           }
         }
 
-        const type = hasMeta ? meta.type : (record?.type ?? null);
-        const deviceId = hasMeta ? (meta.deviceId ?? null) : (record?.deviceId ?? null);
-        const activatedAt = hasMeta ? (meta.activatedAt ?? null) : (record?.activatedAt ?? null);
-        const expiresAt = hasMeta ? (meta.expiresAt ?? null) : (record?.expiresAt ?? null);
-        const kvExpiresAt = entry.expiration
-          ? new Date(entry.expiration * 1000).toISOString()
-          : null;
-
-        items.push({
-          hash: entry.name.slice(USED_PREFIX.length),
-          hashPrefix: entry.name.slice(USED_PREFIX.length, USED_PREFIX.length + 8),
-          type,
-          deviceId,
-          activatedAt,
-          expiresAt,
-          // KV 记录本身的过期时间 = 卡到期 + 1 天缓冲，不是卡到期时间
-          kvExpiresAt,
-          daysLeft: expiresAt
-            ? Math.ceil((new Date(expiresAt).getTime() - now) / 86400000)
+        const hash = entry.name.slice(USED_PREFIX.length);
+        byHash.set(hash, {
+          hash,
+          hashPrefix: hash.slice(0, 8),
+          type: hasMeta ? meta.type : (record?.type ?? null),
+          deviceId: hasMeta ? (meta.deviceId ?? null) : (record?.deviceId ?? null),
+          activatedAt: hasMeta ? (meta.activatedAt ?? null) : (record?.activatedAt ?? null),
+          expiresAt: hasMeta ? (meta.expiresAt ?? null) : (record?.expiresAt ?? null),
+          // KV 记录自身的过期时间 = 卡到期 + 1 天缓冲，不是卡到期时间
+          kvExpiresAt: entry.expiration
+            ? new Date(entry.expiration * 1000).toISOString()
             : null,
-          lifetime: type === "lifetime",
           legacy,
         });
       }
@@ -317,11 +299,124 @@ async function handleAdminActivations(request, env, url) {
       cursor = page.cursor;
     }
   } catch (error) {
-    return json({ ok: false, reason: "kv_list_failed", message: String(error?.message || error) }, 502);
+    return { ok: false, message: String(error?.message || error) };
   }
+  return { ok: true, byHash };
+}
+
+/**
+ * GET /api/admin/activations —— 已激活/已用掉的卡（只含被用过的记录）
+ */
+
+async function handleAdminActivations(request, env, url) {
+  const denied = guardAdmin(request, url, env);
+  if (denied) return denied;
+
+  const kv = env?.ACCESS_KV;
+  if ((await checkKv(kv)) !== "ok") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
+  const scanned = await scanUsage(kv);
+  if (!scanned.ok) {
+    return json({ ok: false, reason: "kv_list_failed", message: scanned.message }, 502);
+  }
+
+  const now = Date.now();
+  const items = [...scanned.byHash.values()].map((row) => ({
+    ...row,
+    daysLeft: row.expiresAt
+      ? Math.ceil((new Date(row.expiresAt).getTime() - now) / 86400000)
+      : null,
+    lifetime: row.type === "lifetime",
+  }));
 
   items.sort((a, b) => (a.activatedAt || "").localeCompare(b.activatedAt || ""));
   return json({ ok: true, count: items.length, items });
+}
+
+const STATUS_ORDER = { active: 0, expired: 1, unused: 2 };
+
+/**
+ * GET /api/admin/keys —— 全量卡密状态（清单里每一张卡 + 它现在有没有被用掉）
+ *
+ * 与 `/activations` 的区别：那个只看 KV 里「被用过的」，没激活的卡完全不在结果里，
+ * 所以没法回答「我卖出去/生成了 55 张，还剩几张没用」。这个接口以清单为基准做左右合并：
+ *   unused  未使用（KV 里没有记录）
+ *   active  已激活且未到期
+ *   expired 已激活但已过期
+ * 只输出 hash 前缀，不输出完整哈希以外的任何敏感信息；明文本身服务端从来没有过。
+ */
+async function handleAdminKeys(request, env, url) {
+  const denied = guardAdmin(request, url, env);
+  if (denied) return denied;
+
+  const kv = env?.ACCESS_KV;
+  if ((await checkKv(kv)) !== "ok") {
+    return json({ ok: false, reason: "kv_unavailable" }, 503);
+  }
+
+  const origin = new URL(request.url).origin;
+  const { ok: listOk, list } = await loadKeyList(env, origin);
+  if (!listOk) {
+    return json({ ok: false, reason: "config_unavailable" }, 503);
+  }
+
+  const scanned = await scanUsage(kv);
+  if (!scanned.ok) {
+    return json({ ok: false, reason: "kv_list_failed", message: scanned.message }, 502);
+  }
+
+  const now = Date.now();
+  const manifestHashes = new Set(list.map((e) => e.hash));
+  const items = list.map((entry) => {
+    const hash = String(entry.hash || "");
+    const used = scanned.byHash.get(hash) || null;
+    let status = "unused";
+    if (used) {
+      const expiredByTime = used.expiresAt
+        ? new Date(used.expiresAt).getTime() <= now
+        : false;
+      status = expiredByTime ? "expired" : "active";
+    }
+    return {
+      hashPrefix: hash.slice(0, 8),
+      type: entry.type ?? null,
+      status,
+      deviceId: used?.deviceId ?? null,
+      activatedAt: used?.activatedAt ?? null,
+      expiresAt: used?.expiresAt ?? null,
+      daysLeft: used?.expiresAt
+        ? Math.ceil((new Date(used.expiresAt).getTime() - now) / 86400000)
+        : null,
+      legacy: used?.legacy ?? false,
+    };
+  });
+
+  const summary = { total: items.length, unused: 0, active: 0, expired: 0, byType: {} };
+  for (const item of items) {
+    summary[item.status] += 1;
+    const bucket = (summary.byType[item.type] ||= {
+      total: 0,
+      unused: 0,
+      active: 0,
+      expired: 0,
+    });
+    bucket.total += 1;
+    bucket[item.status] += 1;
+  }
+
+  // 清单换过批次时，KV 里可能存在清单中已不存在的历史记录
+  const orphan = [...scanned.byHash.keys()].filter((h) => !manifestHashes.has(h)).length;
+
+  items.sort(
+    (a, b) =>
+      STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+      String(a.type).localeCompare(String(b.type)) ||
+      a.hashPrefix.localeCompare(b.hashPrefix),
+  );
+
+  return json({ ok: true, summary, orphan, items });
 }
 
 /**
@@ -521,6 +616,12 @@ export default {
           return json({ ok: false, reason: "method_not_allowed" }, 405);
         }
         return handleAdminActivations(request, env, url);
+      }
+      if (url.pathname === "/api/admin/keys") {
+        if (request.method !== "GET") {
+          return json({ ok: false, reason: "method_not_allowed" }, 405);
+        }
+        return handleAdminKeys(request, env, url);
       }
       if (url.pathname === "/api/admin/rebind") {
         return handleAdminRebind(request, env, url);
