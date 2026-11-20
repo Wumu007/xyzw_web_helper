@@ -355,9 +355,11 @@ Invoke-RestMethod "https://xyzw-web-helper-2dx.pages.dev/api/admin/unrevoke" `
 
 ---
 
-## 十、卡密管理页面（`/admin/cards.html`）
+## 十、卡密管理页面（`/admin/cards`）
 
-不想敲命令时用它：`https://<站点>/admin/cards.html`
+不想敲命令时用它：`https://<站点>/admin/cards`
+
+> 地址不带 `.html`：Pages 会把 `/admin/cards.html` 用 308 跳到这个干净地址，`/admin/` 也会自动跳过来。
 
 - **同源部署**：页面跟着构建产物一起发布，直接调 `/api/admin/*`，不需要额外配 CORS。
 - **数据来源两档**：没填令牌 = 演示数据（42 张假卡，可以随便点，改动只存在自己浏览器里）；填了 `ADMIN_TOKEN` = 真实数据。
