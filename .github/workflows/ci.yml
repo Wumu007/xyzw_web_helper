@@ -1,0 +1,102 @@
+name: CI
+
+# 变更准入层：把「能不能跑」的判断从部署后提前到部署前。
+# 目标：任何进入 main 的代码（含 auto-sync-upstream 的快进合并）都必须先证明可构建、可测试。
+# 说明见 .github/HIGH-AVAILABILITY.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: 构建与测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 单元测试
+        run: pnpm test
+
+      - name: 生产构建
+        run: pnpm build
+
+      - name: 校验构建产物契约
+        run: node scripts/verify-dist.mjs
+
+      - name: 输出产物概览
+        if: always()
+        run: |
+          {
+            echo "## 构建产物概览"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo "| dist 体积 | $(du -sh dist 2>/dev/null | cut -f1 || echo 缺失) |"
+            echo "| _worker.js | $( [ -f dist/_worker.js ] && echo 存在 || echo 缺失) |"
+            echo "| access-keys.json | $( [ -f dist/access-keys.json ] && echo 存在 || echo 缺失) |"
+            echo "| JS 分片数 | $(ls dist/assets/*.js 2>/dev/null | wc -l) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  lint:
+    name: 代码风格（非阻塞）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 风格问题不影响运行，先观察一段时间再决定是否转为阻塞。
+    continue-on-error: true
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm lint
