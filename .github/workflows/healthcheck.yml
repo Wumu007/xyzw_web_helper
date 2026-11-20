@@ -1,0 +1,213 @@
+name: 线上巡检
+
+# 观测层：每 30 分钟验证一次「线上真的能跑」，而不是「部署显示成功」。
+# 覆盖四类检查：静态页面、关键资源、卡密接口、官方数据源。
+# 判定失败 -> 自动创建/更新 Issue；恢复后自动关闭。
+# 手动触发时可指定回滚最近 N 个提交（应急用，常规回滚优先用 Cloudflare 控制台的部署回滚）。
+# 说明见 .github/HIGH-AVAILABILITY.md
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      rollback_commits:
+        description: '回滚最近 N 个提交（0 = 仅巡检；应急用）'
+        required: false
+        default: '0'
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: healthcheck
+  cancel-in-progress: false
+
+env:
+  SITE: https://xyzw-web-helper-2dx.pages.dev
+  OFFICIAL_RES: https://xxz-xyzw-res.hortorgames.com
+
+jobs:
+  probe:
+    name: 巡检线上可用性
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: 执行健康检查
+        id: check
+        run: |
+          set -uo pipefail
+          failed=0
+          warned=0
+          rows=""
+
+          rec() { rows="${rows}| $1 | $2 | $3 |"$'\n'; }
+
+          echo "::group::1. 首页"
+          code=$(curl -sS -o /tmp/home.html -w '%{http_code}' --max-time 30 --retry 2 --retry-delay 3 "$SITE/" || echo 000)
+          if [ "$code" = "200" ] && grep -q 'id="app"' /tmp/home.html; then
+            rec "首页 HTML" "PASS" "HTTP $code，含 #app 挂载点"
+          else
+            rec "首页 HTML" "FAIL" "HTTP $code 或缺少 #app"
+            failed=$((failed+1))
+          fi
+          echo "::endgroup::"
+
+          echo "::group::2. 关键前端资源"
+          assets=$(grep -oE 'src="/assets/[^"]+\.js"' /tmp/home.html 2>/dev/null | sed 's/src="//;s/"//' | head -3)
+          if [ -z "$assets" ]; then
+            rec "前端 JS 分片" "FAIL" "首页未引用任何 /assets/*.js"
+            failed=$((failed+1))
+          else
+            bad=0
+            count=$(printf '%s\n' $assets | wc -l)
+            for a in $assets; do
+              c=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$SITE$a" || echo 000)
+              [ "$c" = "200" ] || { bad=$((bad+1)); echo "缺失: $a ($c)"; }
+            done
+            if [ "$bad" -gt 0 ]; then
+              rec "前端 JS 分片" "FAIL" "$bad/$count 个分片不可访问"
+              failed=$((failed+1))
+            else
+              rec "前端 JS 分片" "PASS" "抽样 $count 个均可访问"
+            fi
+          fi
+          echo "::endgroup::"
+
+          echo "::group::3. 卡密清单"
+          kc=$(curl -sS -o /tmp/keys.json -w '%{http_code}' --max-time 30 "$SITE/access-keys.json" || echo 000)
+          if [ "$kc" = "200" ] && node -e "const a=JSON.parse(require('fs').readFileSync('/tmp/keys.json','utf8'));process.exit(Array.isArray(a)&&a.length>0?0:1)" 2>/dev/null; then
+            rec "卡密清单" "PASS" "HTTP $kc，非空数组"
+          else
+            rec "卡密清单" "FAIL" "HTTP $kc 或内容非法"
+            failed=$((failed+1))
+          fi
+          echo "::endgroup::"
+
+          echo "::group::4. 卡密校验接口"
+          resp=$(curl -sS -w '\n%{http_code}' --max-time 30 -X POST "$SITE/api/verify-key" \
+            -H 'Content-Type: application/json' \
+            -d '{"key":"__healthcheck_probe_invalid__","deviceId":"healthcheck"}' || printf '\n000')
+          vcode=$(echo "$resp" | tail -n1)
+          vbody=$(echo "$resp" | sed '$d')
+          if [ "$vcode" = "200" ] && echo "$vbody" | grep -q '"invalid"'; then
+            rec "卡密接口" "PASS" "HTTP 200，无效密钥正确返回 invalid"
+          elif [ "$vcode" = "405" ]; then
+            rec "卡密接口" "FAIL" "HTTP 405：Worker 未接管 /api/verify-key（产物缺失或被覆盖）"
+            failed=$((failed+1))
+          elif [ "$vcode" = "503" ]; then
+            rec "卡密接口" "WARN" "HTTP 503，KV 绑定缺失（前端会降级本机模式）"
+            warned=$((warned+1))
+          else
+            rec "卡密接口" "FAIL" "HTTP $vcode，响应：$(echo "$vbody" | head -c 120)"
+            failed=$((failed+1))
+          fi
+          echo "::endgroup::"
+
+          echo "::group::5. 官方数据源（外部依赖）"
+          ver=$(curl -sS --max-time 20 "$OFFICIAL_RES/data/version.json" 2>/dev/null | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+          if [ -z "$ver" ]; then
+            rec "官方数据源" "WARN" "version.json 不可读"
+            warned=$((warned+1))
+          else
+            cc=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 "$OFFICIAL_RES/data/$ver/config.json" || echo 000)
+            if [ "$cc" = "200" ]; then
+              rec "官方数据源" "PASS" "version=$ver，config.json HTTP 200"
+            else
+              rec "官方数据源" "WARN" "version=$ver，config.json HTTP $cc（工具会自动回退，不影响站点存活）"
+              warned=$((warned+1))
+            fi
+          fi
+          echo "::endgroup::"
+
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "warned=$warned" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 线上巡检结果"
+            echo ""
+            echo "站点：$SITE"
+            echo ""
+            echo "| 检查项 | 结果 | 详情 |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "**致命失败 ${failed} 项 / 警告 ${warned} 项**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$rows"
+
+      - name: 失败时告警（创建/更新 Issue）
+        if: steps.check.outputs.failed != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create healthcheck --color b60205 --description "线上巡检异常" 2>/dev/null || true
+          BODY="线上巡检发现 **${{ steps.check.outputs.failed }}** 项致命失败、${{ steps.check.outputs.warned }} 项警告。
+
+          - 站点：${{ env.SITE }}
+          - 时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - 运行详情：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          **排查顺序**
+          1. 打开上面的运行详情，查看 Job Summary 里哪一项 FAIL；
+          2. 若「卡密接口」405 → 构建产物缺 `dist/_worker.js` 或其中没有 `/api/verify-key` 路由；
+          3. 若首页/分片 404 → 部署未完成或产物缺失，去 Cloudflare Pages 看构建日志；
+          4. 需要立即恢复 → Cloudflare 控制台 → 部署 → 选择上一个正常版本 → 回滚（秒级生效）。"
+          existing="$(gh issue list --label healthcheck --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$BODY"
+          else
+            gh issue create --title "线上巡检异常：${{ steps.check.outputs.failed }} 项失败" --body "$BODY" --label healthcheck
+          fi
+
+      - name: 恢复时关闭 Issue
+        if: steps.check.outputs.failed == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing="$(gh issue list --label healthcheck --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "巡检已恢复正常（$(date -u '+%Y-%m-%d %H:%M:%S UTC')），自动关闭。"
+            gh issue close "$existing"
+          fi
+
+  rollback:
+    name: 回滚最近提交
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_commits != '0' && github.event.inputs.rollback_commits != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出完整历史
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 生成回滚提交并推送
+        env:
+          N: ${{ github.event.inputs.rollback_commits }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! echo "$N" | grep -qE '^[1-9][0-9]*$'; then
+            echo "回滚数量必须是正整数，收到：$N"; exit 1
+          fi
+          total=$(git rev-list --count HEAD)
+          if [ "$N" -ge "$total" ]; then
+            echo "回滚数量 $N 不小于提交总数 $total，拒绝执行"; exit 1
+          fi
+          base="$(git rev-parse "HEAD~${N}")"
+          echo "将回滚 ${base}..HEAD（共 $N 个提交）："
+          git log --oneline "${base}..HEAD"
+          if ! git revert --no-edit "${base}..HEAD"; then
+            git revert --abort || true
+            echo "::error::回滚存在冲突（可能包含合并提交），需人工处理。建议改用 Cloudflare 控制台的部署回滚。"
+            exit 1
+          fi
+          git push origin HEAD:main
+          echo "## 回滚完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "已回滚 $N 个提交，Pages 将自动重新部署。" >> "$GITHUB_STEP_SUMMARY"
