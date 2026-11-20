@@ -4,6 +4,7 @@
       <img src="/icons/xiaoyugan.png" alt="logo" class="gate-logo" />
       <h2 class="gate-title">快乐咸鱼 · 访问验证</h2>
       <p class="gate-tip">请输入访问密钥（支持周 / 月 / 季 / 年 / 终身）</p>
+      <p class="gate-hint">清理过浏览器数据？在同一台设备上重新输入原密钥即可恢复，不会重新计时。</p>
 
       <n-input
         v-model:value="keyInput"
@@ -31,12 +32,13 @@
 
 <script setup>
 /**
- * 访问密钥门禁（v2：一密一次性 + 激活起算有效期）
+ * 访问密钥门禁（v3：一密一次性 + 激活起算有效期 + 同设备幂等恢复）
  *
  * 规则：
  *  - 首次进入必须先通过密钥验证（全屏置顶弹窗，首个弹窗）
- *  - 密钥一次性使用：验证成功即被消耗，之后任何终端（含原终端）
- *    都不能再输入该密钥；已激活设备靠本地记录继续使用直到到期
+ *  - 密钥一次性使用：验证成功即被消耗；**同一设备**（同一 deviceId）再次输入
+ *    属于恢复，服务端返回原有效期，不重新计时；换到另一台设备则返回 used
+ *    （需要卖家通过 /api/admin/rebind 换绑）
  *  - 有效期从输入（激活）时刻起算；到期后自动回到验证页
  *  - 服务端：/api/verify-key（Cloudflare KV，强限制，跨终端生效）；
  *    服务端不可用时降级本机模式（本机一次性 + 本机激活起算仍然生效）
@@ -149,7 +151,8 @@ function onError(reason, extra) {
       errorMsg.value = "密钥无效，请检查后重试";
       break;
     case "used":
-      errorMsg.value = "该密钥已被使用，无法再次输入";
+      errorMsg.value =
+        "该密钥已被其他设备使用；换设备或清过缓存请联系卖家换绑";
       break;
     case "expired":
       errorMsg.value =
@@ -197,7 +200,16 @@ async function verify() {
       persist(hash, result.type, result.expiresAt);
       locked.value = false;
       keyInput.value = "";
-      message.success("激活成功，欢迎使用快乐咸鱼！");
+      if (result.resumed) {
+        // 同设备幂等恢复：不重新计时，沿用服务端记录的有效期
+        message.success(
+          result.expiresAt
+            ? `已恢复访问，有效期至 ${new Date(result.expiresAt).toLocaleString()}`
+            : "已恢复访问（长期有效）",
+        );
+      } else {
+        message.success("激活成功，欢迎使用快乐咸鱼！");
+      }
       return;
     }
 
@@ -218,7 +230,10 @@ async function verify() {
       onError("invalid");
       return;
     }
-    const days = DURATIONS_DAYS[entry.type] ?? 30;
+    // 不能用 ?? 兜底：DURATIONS_DAYS.lifetime 的值就是 null，`null ?? 30` 会把终身卡算成 30 天
+    const days = Object.hasOwn(DURATIONS_DAYS, entry.type)
+      ? DURATIONS_DAYS[entry.type]
+      : 30;
     const expiresAt =
       days === null
         ? null
@@ -288,6 +303,13 @@ onUnmounted(() => {
   margin: 0 0 20px;
   font-size: 13px;
   color: var(--text-secondary, #666);
+}
+
+.gate-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary, #999);
 }
 
 .gate-btn {

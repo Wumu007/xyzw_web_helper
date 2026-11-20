@@ -1,7 +1,8 @@
 name: 线上巡检
 
 # 观测层：每 30 分钟验证一次「线上真的能跑」，而不是「部署显示成功」。
-# 覆盖四类检查：静态页面、关键资源、卡密接口、官方数据源。
+# 覆盖六类检查：静态页面、关键资源、巡检探针（卡密清单 + KV）、卡密接口、官方数据源、清单不公开。
+# 巡检探针（__healthcheck_probe__）是唯一能发现「KV 绑定丢失」的手段：它既不消耗卡密也不写 KV。
 # 判定失败 -> 自动创建/更新 Issue；恢复后自动关闭。
 # 手动触发时可指定回滚最近 N 个提交（应急用，常规回滚优先用 Cloudflare 控制台的部署回滚）。
 # 说明见 .github/HIGH-AVAILABILITY.md
@@ -76,13 +77,28 @@ jobs:
           fi
           echo "::endgroup::"
 
-          echo "::group::3. 卡密清单"
-          kc=$(curl -sS -o /tmp/keys.json -w '%{http_code}' --max-time 30 "$SITE/access-keys.json" || echo 000)
-          if [ "$kc" = "200" ] && node -e "const a=JSON.parse(require('fs').readFileSync('/tmp/keys.json','utf8'));process.exit(Array.isArray(a)&&a.length>0?0:1)" 2>/dev/null; then
-            rec "卡密清单" "PASS" "HTTP $kc，非空数组"
-          else
-            rec "卡密清单" "FAIL" "HTTP $kc 或内容非法"
+          echo "::group::3. 巡检探针（卡密清单 + KV 状态）"
+          # 探针密钥不消耗任何卡密、不写 KV，同时回报两件最容易静默坏掉的事：
+          # 清单读不到（所有卡密都激活不了）、KV 绑定丢失（一次性消耗与跨设备限制失效）。
+          presp=$(curl -sS -w '\n%{http_code}' --max-time 30 -X POST "$SITE/api/verify-key" \
+            -H 'Content-Type: application/json' \
+            -d '{"key":"__healthcheck_probe__","deviceId":"healthcheck"}' || printf '\n000')
+          pcode=$(echo "$presp" | tail -n1)
+          pbody=$(echo "$presp" | sed '$d')
+          p_list=$(echo "$pbody" | grep -o '"keyList":"[a-z]*"' | head -1 | cut -d'"' -f4)
+          p_keys=$(echo "$pbody" | grep -o '"keys":[-0-9]*' | head -1 | cut -d: -f2)
+          p_kv=$(echo "$pbody" | grep -o '"kv":"[a-z]*"' | head -1 | cut -d'"' -f4)
+          if [ "$pcode" != "200" ]; then
+            rec "巡检探针" "FAIL" "HTTP $pcode，探针不可用（先看下一项的接口探测）"
             failed=$((failed+1))
+          elif [ "$p_list" != "ok" ] || [ "${p_keys:-0}" -le 0 ]; then
+            rec "巡检探针" "FAIL" "卡密清单不可读（keyList=$p_list，keys=$p_keys）→ dist/access-keys.json 缺失或内容非法，所有卡密都会激活失败"
+            failed=$((failed+1))
+          elif [ "$p_kv" != "ok" ]; then
+            rec "巡检探针" "FAIL" "KV 不可用（kv=$p_kv）→ ACCESS_KV 绑定丢失或命名空间被删，一次性消耗与跨设备限制失效"
+            failed=$((failed+1))
+          else
+            rec "巡检探针" "PASS" "清单 $p_keys 条可读，KV 可读"
           fi
           echo "::endgroup::"
 
@@ -98,8 +114,8 @@ jobs:
             rec "卡密接口" "FAIL" "HTTP 405：Worker 未接管 /api/verify-key（产物缺失或被覆盖）"
             failed=$((failed+1))
           elif [ "$vcode" = "503" ]; then
-            rec "卡密接口" "WARN" "HTTP 503，KV 绑定缺失（前端会降级本机模式）"
-            warned=$((warned+1))
+            rec "卡密接口" "FAIL" "HTTP 503，KV 绑定缺失（前端会降级本机模式）"
+            failed=$((failed+1))
           else
             rec "卡密接口" "FAIL" "HTTP $vcode，响应：$(echo "$vbody" | head -c 120)"
             failed=$((failed+1))
@@ -119,6 +135,16 @@ jobs:
               rec "官方数据源" "WARN" "version=$ver，config.json HTTP $cc（工具会自动回退，不影响站点存活）"
               warned=$((warned+1))
             fi
+          fi
+          echo "::endgroup::"
+
+          echo "::group::6. 卡密清单不对外公开"
+          kc=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$SITE/access-keys.json" || echo 000)
+          if [ "$kc" = "404" ]; then
+            rec "清单不公开" "PASS" "HTTP 404，哈希清单不可直接下载"
+          else
+            rec "清单不公开" "WARN" "HTTP $kc：哈希清单可被直接下载（排障时开过 SERVE_KEY_LIST=1？）"
+            warned=$((warned+1))
           fi
           echo "::endgroup::"
 
@@ -153,9 +179,11 @@ jobs:
 
           **排查顺序**
           1. 打开上面的运行详情，查看 Job Summary 里哪一项 FAIL；
-          2. 若「卡密接口」405 → 构建产物缺 `dist/_worker.js` 或其中没有 `/api/verify-key` 路由；
-          3. 若首页/分片 404 → 部署未完成或产物缺失，去 Cloudflare Pages 看构建日志；
-          4. 需要立即恢复 → Cloudflare 控制台 → 部署 → 选择上一个正常版本 → 回滚（秒级生效）。"
+          2. 若「巡检探针」kv!=ok → Cloudflare Pages → 设置 → 绑定，检查 ACCESS_KV 是否还在（命名空间被删要重建并重新绑定）；
+          3. 若「巡检探针」keyList!=ok 或 keys<=0 → 产物里的 access-keys.json 缺失/被破坏，看构建日志的产物校验；
+          4. 若「卡密接口」405 → 构建产物缺 `dist/_worker.js` 或其中没有 `/api/verify-key` 路由；
+          5. 若首页/分片 404 → 部署未完成或产物缺失，去 Cloudflare Pages 看构建日志；
+          6. 需要立即恢复 → Cloudflare 控制台 → 部署 → 选择上一个正常版本 → 回滚（秒级生效）。"
           existing="$(gh issue list --label healthcheck --state open --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$BODY"
