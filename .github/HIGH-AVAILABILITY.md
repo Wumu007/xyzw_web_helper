@@ -211,7 +211,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 ### 管理接口（需 `Authorization: Bearer <ADMIN_TOKEN>` 或 `X-Admin-Token`）
 
 ```bash
-# 1) 看激活/到期情况（含类型、设备、剩余天数）
+# 1) 看激活/到期情况（含完整 hash、类型、设备、剩余天数）
 curl -s "https://<站点>/api/admin/activations" -H "Authorization: Bearer $ADMIN_TOKEN"
 
 # 2) 换绑：把一张已激活的卡改到新设备（保留原有效期，不重新计时）
@@ -219,13 +219,27 @@ curl -s -X POST "https://<站点>/api/admin/rebind" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"key":"KL-xxxxxx-xxxxxx-xxxxxx","deviceId":"<新设备ID>"}'
 
-# 3) 修复被历史 bug 写成 30 天的终身卡（expiresAt 传 null 表示永久）
+# 3) 修复被历史 bug 写成 30 天的终身卡：用 hash 定位，不需要明文卡密
 curl -s -X POST "https://<站点>/api/admin/rebind" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"key":"KL-xxxxxx-xxxxxx-xxxxxx","deviceId":"<原设备ID>","expiresAt":null}'
+  -d '{"hash":"<activations 返回的 64 位 hash>","expiresAt":null}'
 ```
 
-> **历史 bug 提醒（2026-11-20 修复）**：`DURATIONS_DAYS[type] ?? 30` 会把 `lifetime` 的 `null` 变成 30 天，导致**终身卡实际只有 30 天**。代码已改为 `Object.hasOwn` 判定并由单测锁死；但**修复前已激活的终身卡，KV 里的到期时间仍是 30 天**，需要用上面的第 3 条接口逐张修（`/api/admin/activations` 里 `type=lifetime` 且 `expiresAt` 不为空的就是要修的）。
+`rebind` 的入参约定：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `key` | 二选一 | 明文卡密；服务端自己算 hash |
+| `hash` | 二选一 | 64 位 sha256，直接来自 `activations`（用于明文已找不到的历史记录） |
+| `deviceId` | 否 | 省略 = 保持原设备绑定不变 |
+| `expiresAt` | 否 | ISO 时间字符串，或 `null` 表示改为永久；省略 = 保持原到期时间 |
+
+> **阅读 activations 结果的两个坑**：
+> 1. **`metadata` 缺失 ≠ 终身卡**。本次改动之前写入的记录没有 metadata，服务端会补一次 `kv.get` 从记录值里读真实 `type`，并在返回里标 `legacy: true`。早期版本的接口曾把「无 metadata」误判成 `lifetime: true`，已修正——`lifetime` 现在只由 `type === "lifetime"` 决定。
+> 2. **`kvExpiresAt` 不是卡到期时间**。它是 KV 记录自身的过期时间（= 卡到期 + 1 天缓冲），用于核对记录何时被自动清理；卡的真实到期看 `expiresAt`。
+
+> **历史 bug 提醒（2026-11-20 修复）**：`DURATIONS_DAYS[type] ?? 30` 会把 `lifetime` 的 `null` 变成 30 天，导致**终身卡实际只有 30 天**。代码已改为 `Object.hasOwn` 判定并由单测锁死；但**修复前已激活的终身卡，KV 里的到期时间仍是 30 天**，需要用上面的第 3 条逐张修（筛 `type=lifetime` 且 `expiresAt` 不为 `null`）。
+> 修复后用户端不需要做任何事：到期那天客户端会要求重新输入密钥，服务端 `resumed` 会重新写入 `expiresAt: null`，从此永久有效。
 
 ### 换设备的标准处置流程
 

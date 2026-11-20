@@ -383,6 +383,73 @@ describe("管理接口", () => {
     assert.equal(body.items[0].lifetime, false);
   });
 
+  test("旧记录（没有 metadata）要从记录值里读出真实类型，不能误判成终身卡", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    const hash = await sha256(WEEK_KEY);
+    // 模拟旧版 worker 写入：只有值，没有 metadata
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({
+        deviceId: "device-old",
+        type: "week",
+        activatedAt: "2026-11-19T10:34:50.000Z",
+        expiresAt: "2026-11-26T10:34:50.000Z",
+      }),
+      { expirationTtl: 8 * 86400 },
+    );
+
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/activations`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const item = body.items[0];
+    assert.equal(item.type, "week", "must read type from the record value");
+    assert.equal(item.lifetime, false, "missing metadata must not imply lifetime");
+    assert.equal(item.deviceId, "device-old");
+    assert.equal(item.expiresAt, "2026-11-26T10:34:50.000Z");
+    assert.equal(item.legacy, true);
+    assert.equal(item.hash, hash, "full hash must be exposed so repairs need no plaintext key");
+  });
+
+  test("按 hash 修复终身卡：无需明文密钥，也不改变设备绑定", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    const hash = await sha256(WEEK_KEY);
+    // 历史 bug 留下的记录：type 是 lifetime，却带着 30 天到期时间
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({
+        deviceId: "device-old",
+        type: "lifetime",
+        activatedAt: "2026-11-19T10:26:12.000Z",
+        expiresAt: "2026-12-19T10:26:12.000Z",
+      }),
+      { expirationTtl: 31 * 86400 },
+    );
+
+    const res = await worker.fetch(
+      new Request(`${SITE}/api/admin/rebind`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Token": TOKEN },
+        body: JSON.stringify({ hash, expiresAt: null }),
+      }),
+      env,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.expiresAt, null);
+    assert.equal(body.deviceId, "device-old", "omitting deviceId keeps the old binding");
+
+    const stored = kv.store.get(`used:${hash}`);
+    assert.equal(stored.options.expirationTtl, undefined, "TTL must be removed");
+    assert.equal(stored.options.metadata.type, "lifetime");
+  });
+
   test("换绑：改 deviceId 且保留原有效期", async () => {
     const { env, kv } = await seedActivation();
     const before = JSON.parse(kv.store.get(`used:${await sha256(WEEK_KEY)}`).value);

@@ -244,7 +244,15 @@ function guardAdmin(request, url, env) {
   return null;
 }
 
-/** GET /api/admin/activations —— 激活/到期清单（默认只返回最近 1000 条） */
+/**
+ * GET /api/admin/activations —— 激活/到期清单（默认只返回最近 1000 条）
+ *
+ * 注意：本次改动之前写入的记录**没有 metadata**（旧的 worker 不写），只能从记录值里读。
+ * 所以 metadata 缺失时会补一次 kv.get；不能把「metadata 缺失」当成「终身卡」——
+ * 早期版本正是这样把 3 张周卡/月卡误显示成 lifetime=true 的。
+ */
+const LEGACY_LOOKUP_LIMIT = 200;
+
 async function handleAdminActivations(request, env, url) {
   const denied = guardAdmin(request, url, env);
   if (denied) return denied;
@@ -256,6 +264,7 @@ async function handleAdminActivations(request, env, url) {
 
   const now = Date.now();
   const items = [];
+  let legacyLookups = 0;
   let cursor;
   try {
     // eslint-disable-next-line no-constant-condition
@@ -263,21 +272,45 @@ async function handleAdminActivations(request, env, url) {
       const page = await kv.list({ prefix: USED_PREFIX, limit: 1000, cursor });
       for (const entry of page.keys) {
         const meta = entry.metadata || {};
-        const expiresAt = meta.expiresAt ?? null;
-        const recordExpiresAt = entry.expiration
+        const hasMeta = Boolean(meta.type);
+        let record = null;
+        let legacy = false;
+
+        if (!hasMeta && legacyLookups < LEGACY_LOOKUP_LIMIT) {
+          legacyLookups += 1;
+          try {
+            const raw = await kv.get(entry.name);
+            if (raw) {
+              record = JSON.parse(raw);
+              legacy = true;
+            }
+          } catch {
+            record = null;
+          }
+        }
+
+        const type = hasMeta ? meta.type : (record?.type ?? null);
+        const deviceId = hasMeta ? (meta.deviceId ?? null) : (record?.deviceId ?? null);
+        const activatedAt = hasMeta ? (meta.activatedAt ?? null) : (record?.activatedAt ?? null);
+        const expiresAt = hasMeta ? (meta.expiresAt ?? null) : (record?.expiresAt ?? null);
+        const kvExpiresAt = entry.expiration
           ? new Date(entry.expiration * 1000).toISOString()
           : null;
+
         items.push({
+          hash: entry.name.slice(USED_PREFIX.length),
           hashPrefix: entry.name.slice(USED_PREFIX.length, USED_PREFIX.length + 8),
-          type: meta.type ?? null,
-          deviceId: meta.deviceId ?? null,
-          activatedAt: meta.activatedAt ?? null,
+          type,
+          deviceId,
+          activatedAt,
           expiresAt,
-          recordExpiresAt,
+          // KV 记录本身的过期时间 = 卡到期 + 1 天缓冲，不是卡到期时间
+          kvExpiresAt,
           daysLeft: expiresAt
             ? Math.ceil((new Date(expiresAt).getTime() - now) / 86400000)
             : null,
-          lifetime: !expiresAt,
+          lifetime: type === "lifetime",
+          legacy,
         });
       }
       if (page.list_complete) break;
@@ -291,7 +324,13 @@ async function handleAdminActivations(request, env, url) {
   return json({ ok: true, count: items.length, items });
 }
 
-/** POST /api/admin/rebind —— 把已激活卡密的设备绑定改到新 deviceId（保留原有效期） */
+/**
+ * POST /api/admin/rebind —— 换绑设备 / 修复到期时间
+ *
+ * 入参二选一：`key`（明文卡密）或 `hash`（64 位 sha256，来自 activations 列表）。
+ * 用 hash 是为了修「明文已经找不到」的历史记录——老的批次卡密未必还留着。
+ * `deviceId` 可省略（省略即保持原设备不变）；`expiresAt: null` 表示改为永久有效。
+ */
 async function handleAdminRebind(request, env, url) {
   const denied = guardAdmin(request, url, env);
   if (denied) return denied;
@@ -308,8 +347,16 @@ async function handleAdminRebind(request, env, url) {
   }
 
   const key = String(body?.key || "").trim();
-  const deviceId = String(body?.deviceId || "").slice(0, 64);
-  if (!key || !deviceId) {
+  const hashInput = String(body?.hash || "").trim().toLowerCase();
+  const nextDeviceId =
+    body?.deviceId === undefined || body?.deviceId === null
+      ? null
+      : String(body.deviceId).slice(0, 64);
+
+  if (!key && !/^[0-9a-f]{64}$/.test(hashInput)) {
+    return json({ ok: false, reason: "bad_request" }, 400);
+  }
+  if (nextDeviceId !== null && !nextDeviceId) {
     return json({ ok: false, reason: "bad_request" }, 400);
   }
 
@@ -318,7 +365,7 @@ async function handleAdminRebind(request, env, url) {
     return json({ ok: false, reason: "kv_unavailable" }, 503);
   }
 
-  const hash = await sha256Hex(key);
+  const hash = key ? await sha256Hex(key) : hashInput;
   const usedKey = USED_PREFIX + hash;
   const raw = await kv.get(usedKey);
   if (!raw) {
@@ -335,7 +382,9 @@ async function handleAdminRebind(request, env, url) {
     return json({ ok: false, reason: "record_corrupt" }, 409);
   }
 
-  record.deviceId = deviceId;
+  if (nextDeviceId !== null) {
+    record.deviceId = nextDeviceId;
+  }
 
   // 支持显式修复到期时间（历史 bug：终身卡曾被写成 30 天）。传 expiresAt: null 表示永久。
   if (Object.hasOwn(body, "expiresAt")) {
@@ -364,8 +413,9 @@ async function handleAdminRebind(request, env, url) {
   await kv.put(usedKey, JSON.stringify(record), options);
   return json({
     ok: true,
+    hash,
     type: record.type,
-    deviceId,
+    deviceId: record.deviceId ?? null,
     activatedAt: record.activatedAt ?? null,
     expiresAt: record.expiresAt ?? null,
     expired: record.expiresAt ? new Date(record.expiresAt).getTime() < Date.now() : false,
