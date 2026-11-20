@@ -1,7 +1,12 @@
 name: Auto Sync Upstream
 
 # 定时 + 手动触发：自动检测上游 w1249178256/xyzw_web_helper 的更新并同步到本仓库 main。
-# 机制说明见 .github/AUTO_SYNC.md 与 scripts/sync-upstream.sh 头部注释。
+#
+# 高可用改造（2026-11-20）：在「检测」与「同步」之间插入「构建验证」。
+#   上游代码若无法构建，则拒绝同步并开 Issue —— 宁可停在旧版本，也不让构建不过的代码上线。
+#   注意：本工作流直接推送 main（快进/合并），会绕过 PR 检查，
+#   因此这里的前置构建验证是 main 分支唯一的自动化防线。
+# 机制说明见 .github/AUTO_SYNC.md、.github/HIGH-AVAILABILITY.md 与 scripts/sync-upstream.sh 头部注释。
 
 on:
   schedule:
@@ -22,8 +27,108 @@ concurrency:
   group: auto-sync-upstream
   cancel-in-progress: false
 
+env:
+  UPSTREAM_REPO: w1249178256/xyzw_web_helper
+  UPSTREAM_BRANCH: main
+
 jobs:
+  detect:
+    name: 检测上游差异
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      behind: ${{ steps.diff.outputs.behind }}
+      ahead: ${{ steps.diff.outputs.ahead }}
+      upstream_sha: ${{ steps.diff.outputs.upstream_sha }}
+    steps:
+      - name: 检出本仓库（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算落后/领先提交数
+        id: diff
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          behind=$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}")
+          ahead=$(git rev-list --count "upstream/${UPSTREAM_BRANCH}..HEAD")
+          sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+          {
+            echo "behind=$behind"
+            echo "ahead=$ahead"
+            echo "upstream_sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## 上游差异检测"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 上游 HEAD | ${sha:0:7} |"
+            echo "| 落后提交数 | ${behind} |"
+            echo "| 本地领先数 | ${ahead} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: 验证合并结果可构建
+    needs: detect
+    if: needs.detect.outputs.behind != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: 检出本仓库（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 试合并上游代码
+        id: merge
+        run: |
+          set -uo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          if git merge --no-edit "upstream/${UPSTREAM_BRANCH}" > /tmp/merge.log 2>&1; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "自动合并成功，继续验证构建。"
+          else
+            git merge --abort 2>/dev/null || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::自动合并存在冲突，本次跳过构建验证；同步脚本将转为 PR 交人工处理。"
+          fi
+
+      - name: 安装依赖
+        if: steps.merge.outputs.merged == 'true'
+        run: pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+
+      - name: 构建
+        if: steps.merge.outputs.merged == 'true'
+        run: pnpm build
+
+      - name: 校验构建产物契约
+        if: steps.merge.outputs.merged == 'true'
+        run: node scripts/verify-dist.mjs
+
   sync:
+    name: 执行上游同步
+    needs: [detect, verify]
+    if: needs.detect.outputs.behind != '0' && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -37,8 +142,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
-          UPSTREAM_REPO: w1249178256/xyzw_web_helper
-          UPSTREAM_BRANCH: main
         run: bash scripts/sync-upstream.sh
 
       - name: 上传同步日志（Artifact，保留 90 天）
@@ -49,16 +152,31 @@ jobs:
           path: sync.log
           retention-days: 90
 
-      - name: 失败时创建/更新跟踪 Issue
-        if: failure()
+  notify:
+    name: 失败告警
+    needs: [detect, verify, sync]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 创建/更新跟踪 Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh label create auto-sync --color d93f0b 2>/dev/null || true
-          BODY="自动同步工作流执行失败，请查看运行日志：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh label create auto-sync --color d93f0b --description "上游自动同步异常" 2>/dev/null || true
+          BODY="自动同步工作流执行失败，请查看运行日志：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          **本次未推送任何代码到 main**（构建验证在推送之前），线上保持上一个可用版本。
+
+          **常见原因**
+          - 「验证合并结果可构建」失败：上游提交了无法构建的代码，需等待上游修复，或手工挑选合并；
+          - 「执行上游同步」失败：网络/权限问题，或存在未解决冲突已转 PR；
+          - 已取消：有新的同步任务启动，可忽略。
+
+          处理完后，下次定时同步会自动重试。"
           EXISTING="$(gh issue list --label auto-sync --state open --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else
-            gh issue create --title "⚠️ 上游自动同步失败" --body "$BODY" --label auto-sync
+            gh issue create --title "上游自动同步失败" --body "$BODY" --label auto-sync
           fi
