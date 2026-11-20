@@ -26,10 +26,11 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # 不指定 version：pnpm/action-setup@v4 会从 package.json 的 packageManager 字段读取，
+      # 同时指定 version 会报 "Multiple versions of pnpm specified" 而直接失败。
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
           run_install: false
 
       - name: 安装 Node.js
@@ -58,7 +59,7 @@ jobs:
             echo ""
             echo "| 项目 | 值 |"
             echo "| --- | --- |"
-            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo "| 提交 | ${GITHUB_SHA:0:7} |"
             echo "| dist 体积 | $(du -sh dist 2>/dev/null | cut -f1 || echo 缺失) |"
             echo "| _worker.js | $( [ -f dist/_worker.js ] && echo 存在 || echo 缺失) |"
             echo "| access-keys.json | $( [ -f dist/access-keys.json ] && echo 存在 || echo 缺失) |"
@@ -86,7 +87,6 @@ jobs:
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
           run_install: false
 
       - name: 安装 Node.js
