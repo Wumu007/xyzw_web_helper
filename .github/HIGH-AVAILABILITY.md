@@ -2,7 +2,7 @@
 
 目标：**让线上尽可能一直可运行**。不靠“不出错”，而靠“错了也进不来、进来了也挡得住、挂了立刻知道、退了能马上退回去”。
 
-> **当前状态（2026-11-20）**：L1–L5 已全部就位。产物契约校验已在 Pages 生产构建中实测生效（`[PASSED] 7 项通过、0 项警告`）；GitHub 分支保护已配置（`main` + Require status checks `构建与测试`，**未**启用 Require a pull request）。
+> **当前状态（2026-11-20）**：L1–L5 已全部就位。产物契约校验已在 Pages 生产构建中实测生效（`[PASSED] 7 项通过、0 项警告`）；GitHub 分支保护已配置（`main` + Require status checks `构建与测试`，**未**启用 Require a pull request）；同步门禁已加入单元测试。
 
 ---
 
@@ -11,7 +11,7 @@
 | 层 | 机制 | 解决的失效模式 | 落地文件 |
 |---|---|---|---|
 | L1 变更准入 | 每次 push/PR 跑 lint + 单测 + 构建 + **产物契约校验** | 语法错、测试回归、构建失败、关键产物缺失 | `.github/workflows/ci.yml`、`scripts/verify-dist.mjs` |
-| L2 同步门禁 | 自动同步前，先在本仓库试合并上游并构建，不通过则**拒绝推送** | 上游提交坏代码被快进直推 main | `.github/workflows/sync-upstream.yml`（`verify` 作业） |
+| L2 同步门禁 | 同步前试合并上游 → **单元测试** → 构建（含产物校验），任一失败则**拒绝推送** | 上游提交坏代码（含“能构建但逻辑改坏”）被快进直推 main | `.github/workflows/sync-upstream.yml`（`verify` 作业） |
 | L3 上线自检 | 每 30 分钟探测线上 5 项指标，失败自动开 Issue，恢复自动关闭 | “部署显示成功但实际打不开”的假存活 | `.github/workflows/healthcheck.yml` |
 | L4 运行时降级 | KV 缺失 → 前端降级本机校验；官方配置 404 → 回退权威版本 | 外部依赖异常导致整体不可用 | `worker.js`、`src/utils/dailyTaskState.js`、`AccessGate.vue` |
 | L5 快速回滚 | Cloudflare 控制台部署回滚（秒级）；或手动触发 workflow 生成 revert 提交 | 坏版本已上线 | 控制台 + `healthcheck.yml`（`rollback` 作业） |
@@ -150,7 +150,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 | 巡检报「首页 500 / 分片 404」 | Pages 构建失败或部署中断 | 看 Pages 构建日志；回滚上一个正常部署 |
 | 巡检报「卡密接口 503」 | KV 绑定丢失 | 重新绑定 `ACCESS_KV`，重试部署 |
 | 巡检只有「官方数据源 WARN」 | 官方换版本、资源未发布 | 无需操作，工具已自动回退；等官方补齐 |
-| 自动同步连续失败 | 上游构建不过，**或误开了 Require a pull request** | 前者等上游修复；后者关掉该规则或给 bot 加 bypass |
+| 自动同步连续失败 | 上游**单测或构建**不过，或误开了 Require a pull request | 前者等上游修复（若上游测试 flaky 可手动跑一次确认）；后者关掉该规则或给 bot 加 bypass |
 
 **回滚优先用 Cloudflare 控制台**：`部署 → 选择上一个正常版本 → 回滚`，秒级生效且不产生新提交。
 `healthcheck.yml` 的 `rollback_commits` 仅作为没有控制台权限时的应急手段（会生成 revert 提交，遇合并提交可能冲突）。
@@ -165,6 +165,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 4. **无跨用户真实链路验证**：巡检只验证“服务在”，不验证“能登录、能跑任务”，后者需要真实账号。
 5. **卡密服务仍依赖 KV**：KV 不可用时只能降级本机模式，“一机一密”的强度会下降。
 6. **分支保护只覆盖 PR**：直推路径（自动同步、API 推代码）不受 `Require status checks` 约束，靠 L2 门禁与产物校验兼顾；这是为了不让自动同步失效而做的取舍。
+7. **同步门禁依赖上游测试质量**：若上游某个用例本身是 flaky 的，同步会被误拦停在旧版本。宁可停在旧版也不静默同步坏逻辑，属有意取舍；确认是 flaky 时可手动 run 一次同步。
 
 ---
 
@@ -172,7 +173,7 @@ CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOU
 
 | 优先级 | 事项 | 收益 |
 |---|---|---|
-| P1 | 每日一次定时 `pnpm test`（当前只在 push 时跑） | 捕捉上游依赖漂移导致的隐性回归 |
 | P2 | CI 直传 Pages（去掉双份构建） | 依赖安装环境完全统一；代价是 2 个 secret + 断开 Git 集成，主要风险已被内嵌校验覆盖 |
 | P2 | 第二托管（EdgeOne/Vercel）+ APP 内置备用域名切换 | 扛住平台级故障 |
-| 暂缓 | 配置快照兜底（IndexedDB 存最近一次成功配置） | 收益概率低，且**静默用过期配置跑批量任务会向游戏服发出错误指令**，风险高于收益；若要做必须是“只读降级 + 页面显式横幅提示” |
+| 暂缓 | 每日定时 `pnpm test` | 已评估：121 个用例均为确定性用例（fake timers / mock 传输），每日重跑收益低；同步门禁已跑 test，覆盖了主要场景 |
+| 暂缓 | 配置快照兜底（IndexedDB） | 收益概率低，且**静默用过期配置跑批量任务会向游戏服发出错误指令**；若要做必须是“只读降级 + 页面显式横幅提示” |
