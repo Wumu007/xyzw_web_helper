@@ -9,8 +9,8 @@
 | 层 | 机制 | 解决的失效模式 | 落地文件 |
 |---|---|---|---|
 | L1 变更准入 | 每次 push/PR 跑 lint + 单测 + 构建 + **产物契约校验** | 语法错、测试回归、构建失败、关键产物缺失 | `.github/workflows/ci.yml`、`scripts/verify-dist.mjs` |
-| L2 同步门禁 | 自动同步前，先在本仓库试合并上游并构建，不通过则**拒绕推送** | 上游提交坏代码被快进直推 main | `.github/workflows/sync-upstream.yml`（`verify` 作业） |
-| L3 上线自检 | 每 30 分钟探测线上 5 类指标，失败自动开 Issue，恢复自动关闭 | “部署显示成功但实际打不开”的假存活 | `.github/workflows/healthcheck.yml` |
+| L2 同步门禁 | 自动同步前，先在本仓库试合并上游并构建，不通过则**拒绝推送** | 上游提交坏代码被快进直推 main | `.github/workflows/sync-upstream.yml`（`verify` 作业） |
+| L3 上线自检 | 每 30 分钟探测线上 5 项指标，失败自动开 Issue，恢复自动关闭 | “部署显示成功但实际打不开”的假存活 | `.github/workflows/healthcheck.yml` |
 | L4 运行时降级 | KV 缺失 → 前端降级本机校验；官方配置 404 → 回退权威版本 | 外部依赖异常导致整体不可用 | `worker.js`、`src/utils/dailyTaskState.js`、`AccessGate.vue` |
 | L5 快速回滚 | Cloudflare 控制台部署回滚（秒级）；或手动触发 workflow 生成 revert 提交 | 坏版本已上线 | 控制台 + `healthcheck.yml`（`rollback` 作业） |
 
@@ -31,12 +31,36 @@
 | `dist/access-keys.json` 为非空数组且每条含 64 位 sha256 | 所有卡密失效 |
 | `dist/assets/` 存在 | 前端脚本未产出 |
 
-本地或 CI 均可运行：
+### 已内嵌进构建脚本（关键，2026-11-20 落地）
+
+校验不是“额外一步、可选步骤”，而是 `package.json` 里 `build` 的组成部分：
+
+```json
+"build": "vite build && node scripts/verify-dist.mjs",
+"build:raw": "vite build",
+"verify": "node scripts/verify-dist.mjs"
+```
+
+这样 **CI、自动同步门禁、Cloudflare Pages 三处共用同一个事实来源**：
+
+| 触发方 | 执行的命令 | 校验到的是哪份产物 |
+|---|---|---|
+| GitHub Actions CI | `pnpm build` | CI 自己构建的 `dist` |
+| 自动同步 `verify` 作业 | `pnpm build` | 试合并上游后的 `dist` |
+| Cloudflare Pages | `npm run build` | **Pages 自己构建、真正要部署的那份 `dist`** |
+
+最后一行是重点：**Pages 的构建命令保持 `npm run build` 不动即可**，无需在控制台额外拼接校验命令（避免忘记改、改错格式）。校验失败 → 构建命令以非 0 退出 → Pages 判定构建失败 → **不切换生产别名，线上继续跑上一个版本**。
+
+单独运行（排查时用）：
 
 ```bash
-node scripts/verify-dist.mjs          # 校验 ./dist
+npm run verify                            # 校验 ./dist
 node scripts/verify-dist.mjs path/to/dist
 ```
+
+### 为什么不用「CI 直传 Pages」
+
+CI 直传（`wrangler pages deploy dist`）需要 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 两个 secret，并要断开 Pages 的 Git 集成、把部署入口唯一化。它相对本方案唯一的增量是“依赖安装环境完全一致”；而本方案让校验直接作用于 Pages 自己的产物，已覆盖「产物残缺」这一类真实故障（2026-11-20 的 405 即此类）。投入产出不划算，暂不实施。
 
 ---
 
@@ -58,9 +82,9 @@ node scripts/verify-dist.mjs path/to/dist
 
 ---
 
-## 四、需要在控制台完成的配置（一次性）
+## 四、需要在控制台完成的配置
 
-### 1. 给 main 加分支保护（强烈建议）
+### 1. 给 main 加分支保护（唯一待办，强烈建议）
 
 `Settings → Branches → Add branch protection rule`
 
@@ -77,7 +101,11 @@ node scripts/verify-dist.mjs path/to/dist
 
 若被解绑，`/api/verify-key` 会返回 503，巡检会报 WARN（不是 FAIL，因为前端会自动降级本机模式，站点仍然能用）。
 
-### 3. GitHub Actions 额度
+### 3. 构建命令保持 `npm run build` 即可
+
+不需要手动拼接校验命令 —— 已在 `package.json` 的 `build` 脚本内完成，见第二节。
+
+### 4. GitHub Actions 额度
 
 - 仓库为 **public** → Actions 分钟数免费，30 分钟一次的巡检成本可忽略。
 - 若转为 **private**：巡检约 24 分钟/月、CI 每次约 3-5 分钟，注意 2000 分钟/月的额度。
@@ -88,7 +116,8 @@ node scripts/verify-dist.mjs path/to/dist
 
 | 现象 | 大概率原因 | 处置 |
 |---|---|---|
-| 巡检报「卡密接口 405」 | 构建产物缺 `_worker.js` 或其中无该路由 | 看 CI 的「校验构建产物契约」是否失败；用控制台回滚上一个部署 |
+| Pages 构建**失败**，日志有 `[FAILED] N 项致命问题` | 产物残缺，被契约校验拦下 | 看具体 FAIL 项修复后重推；这属于**拦截成功**，线上跑的是上一版本，无需回滚 |
+| 巡检报「卡密接口 405」 | 构建产物缺 `_worker.js` 或其中无该路由 | 看 CI 构建是否失败；用控制台回滚上一个部署 |
 | 巡检报「首页 500 / 分片 404」 | Pages 构建失败或部署中断 | 看 Pages 构建日志；回滚上一个正常部署 |
 | 巡检报「卡密接口 503」 | KV 绑定丢失 | 重新绑定 `ACCESS_KV`，重试部署 |
 | 巡检只有「官方数据源 WARN」 | 官方换版本、资源未发布 | 无需操作，工具已自动回退；等官方补齐 |
@@ -101,7 +130,7 @@ node scripts/verify-dist.mjs path/to/dist
 
 ## 六、当前局限（诚实清单）
 
-1. **双份构建**：CI 构建一次、Cloudflare Pages 再构建一次，环境不完全等价（Node/pnpm 版本可能不同）。彻底解法是 CI 构建后直传 Pages（需 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 两个 secret，用 `wrangler pages deploy dist`），可消除差异并把构建产物校验的有效性提升为 100%。
+1. **双份构建（已降级为轻微）**：CI 与 Pages 各构建一次，依赖安装环境可能略有差异。但产物校验已内嵌进 `build` 脚本、**作用于各自构建的产物**，「产物残缺」这类致命问题在两端都会被拦截。剩余差异仅是依赖次要版本浮动可能造成「一边过、一边红」，属可接受范围。
 2. **单点托管**：目前只有 Cloudflare Pages 一个入口。Cloudflare 账号/平台级故障无法自愈。备选是把同一 `dist` 同时部署到 EdgeOne 或 Vercel（上游已有 `edge-functions/` 与 EdgeOne 适配基础），并在 README/APP 里提供备用地址。
 3. **巡检粒度 30 分钟**：故障最长可能 30 分钟才被发现（GitHub 定时任务不支持更细粒度）。
 4. **无跨用户真实链路验证**：巡检只验证“服务在”，不验证“能登录、能跑任务”，后者需要真实账号。
@@ -114,7 +143,7 @@ node scripts/verify-dist.mjs path/to/dist
 | 优先级 | 事项 | 收益 |
 |---|---|---|
 | P0 | 配 branch protection（第四节第 1 条） | 人工提交的坏代码进不了 main |
-| P1 | CI 直传 Pages（去掉双构建） | 构建产物校验的有效性 100%，不再有环境差异 |
-| P1 | 配置快照兜底（IndexedDB 存最近一次成功的官方配置） | 官方数据源全挂时，批量日常仍能用旧快照运行 |
+| P1 | 每日一次定时 `pnpm test`（当前只在 push 时跑） | 捕捉上游依赖漂移导致的隐性回归 |
+| P2 | CI 直传 Pages（去掉双份构建） | 依赖安装环境完全统一；代价是 2 个 secret + 断开 Git 集成，主要风险已被内嵌校验覆盖 |
 | P2 | 第二托管（EdgeOne/Vercel）+ APP 内置备用域名切换 | 扛住平台级故障 |
-| P2 | 每日一次定时 `pnpm test`（当前只在 push 时跑） | 捕捉上游依赖漂移导致的隐性回归 |
+| 暂缓 | 配置快照兜底（IndexedDB 存最近一次成功配置） | 收益概率低，且**静默用过期配置跑批量任务会向游戏服发出错误指令**，风险高于收益；若要做必须是“只读降级 + 页面显式横幅提示” |
