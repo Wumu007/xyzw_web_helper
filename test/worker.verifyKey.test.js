@@ -727,13 +727,97 @@ describe("管理接口", () => {
     assert.ok(left > 29.9, `应还剩约 30 天，实际 ${left.toFixed(2)} 天`);
   });
 
-  test("终身卡不接受延期（没有到期时间可延）", async () => {
+  test("终身卡加时间：变成从今天起算的期限卡，类型按天数归档", async () => {
     const { env } = await seedActivation();
-    await adminPost(env, "/api/admin/rebind", { key: LIFE_KEY, expiresAt: null });
     await callVerify(env, { key: LIFE_KEY, deviceId: "device-life" });
+
     const res = await adminPost(env, "/api/admin/rebind", { key: LIFE_KEY, extendDays: 30 });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // 不能留成「终身卡 + 到期日」这种自相矛盾的行
+    assert.equal(body.type, "month");
+    const left = (new Date(body.expiresAt) - Date.now()) / DAY_MS;
+    assert.ok(left > 29.9 && left <= 30, `应从今天起算约 30 天，实际 ${left.toFixed(2)} 天`);
+
+    const list = await adminGet(env, "/api/admin/keys");
+    const item = (await list.json()).items.find((i) => i.hash === body.hash);
+    assert.equal(item.type, "month");
+    assert.ok(item.daysLeft >= 29, `剩余天数应约 30，实际 ${item.daysLeft}`);
+  });
+
+  test("终身卡缩短：仍然拒绝（永久再缩短没有意义）", async () => {
+    const { env } = await seedActivation();
+    await callVerify(env, { key: LIFE_KEY, deviceId: "device-life" });
+    const res = await adminPost(env, "/api/admin/rebind", { key: LIFE_KEY, extendDays: -7 });
     assert.equal(res.status, 409);
     assert.equal((await res.json()).reason, "already_lifetime");
+  });
+
+  test("周卡改为永久：类型同步变 lifetime，到期与剩余都不再是数字", async () => {
+    const { env, kv } = await seedActivation();
+    const hash = await sha256(WEEK_KEY);
+
+    const res = await adminPost(env, "/api/admin/rebind", { key: WEEK_KEY, expiresAt: null });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).type, "lifetime");
+
+    const list = await adminGet(env, "/api/admin/keys");
+    const item = (await list.json()).items.find((i) => i.hash === hash);
+    assert.equal(item.type, "lifetime", "列表必须显示终身卡，不能还挂着周卡");
+    assert.equal(item.expiresAt, null);
+    assert.equal(item.daysLeft, null);
+    assert.equal(item.status, "active");
+
+    // 永久卡没有到期时间，记录不能被 TTL 清掉（否则会退回未使用 = 白送一张）
+    assert.equal(kv.store.get(`used:${hash}`).expiration, null);
+
+    const chk = await worker.fetch(
+      new Request(`${SITE}/api/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash, deviceId: "device-a" }),
+      }),
+      env,
+    );
+    const chkBody = await chk.json();
+    assert.equal(chkBody.status, "active");
+    assert.equal(chkBody.type, "lifetime");
+    assert.equal(chkBody.expiresAt, null);
+  });
+
+  test("永久卡改回具体日期：类型恢复成出厂类型", async () => {
+    const { env } = await seedActivation();
+    await adminPost(env, "/api/admin/rebind", { key: WEEK_KEY, expiresAt: null });
+
+    const target = new Date(Date.now() + 20 * DAY_MS).toISOString();
+    const res = await adminPost(env, "/api/admin/rebind", { key: WEEK_KEY, expiresAt: target });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).type, "week");
+
+    const hash = await sha256(WEEK_KEY);
+    const list = await adminGet(env, "/api/admin/keys");
+    const item = (await list.json()).items.find((i) => i.hash === hash);
+    assert.equal(item.type, "week");
+    assert.equal(item.daysLeft, 20);
+  });
+
+  test("历史数据兼容：只清了到期时间没改 type 的旧记录，列表按终身卡显示", async () => {
+    const kv = new FakeKV();
+    const { env } = makeEnv({ keys: KEYS, kv, env: { ADMIN_TOKEN: TOKEN } });
+    const hash = await sha256(WEEK_KEY);
+    // 复现旧版「改为永久」写下的记录
+    const activatedAt = new Date(Date.now() - DAY_MS).toISOString();
+    await kv.put(
+      `used:${hash}`,
+      JSON.stringify({ deviceId: "device-a", type: "week", activatedAt, expiresAt: null }),
+      { metadata: { type: "week", deviceId: "device-a", activatedAt, expiresAt: null } },
+    );
+
+    const list = await adminGet(env, "/api/admin/keys");
+    const item = (await list.json()).items.find((i) => i.hash === hash);
+    assert.equal(item.type, "lifetime");
+    assert.equal(item.expiresAt, null);
+    assert.equal(item.status, "active");
   });
 
   test("extendDays 与 expiresAt 同时传：拒绝，避免语义打架", async () => {

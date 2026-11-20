@@ -26,6 +26,18 @@ const DURATIONS_DAYS = {
   lifetime: null,
 };
 
+/**
+ * 按天数反推最接近的类型档位。
+ * 用于「给永久卡加时间」或「把永久卡改回具体日期」——这两种操作之后，
+ * 卡不再是无期限的，标签也要跟着变，否则会出现「终身卡 + 到期日」这种自相矛盾的行。
+ */
+function inferTypeFromDays(days) {
+  if (days <= 7) return "week";
+  if (days <= 30) return "month";
+  if (days <= 90) return "quarter";
+  return "year";
+}
+
 /** 巡检专用密钥：不消耗任何卡密、不返回任何可用信息，只回报清单条数与 KV 状态 */
 const PROBE_KEY = "__healthcheck_probe__";
 const KEY_LIST_PATH = "/access-keys.json";
@@ -101,6 +113,9 @@ function recordMetadata(record) {
   return {
     deviceId: record.deviceId,
     type: record.type,
+    // 出厂类型（清单里的类型）：运营把卡改成永久后，type 变 lifetime，
+    // 但「改回具体日期」时要知道原来是什么卡，所以两者分开存。
+    baseType: record.baseType,
     activatedAt: record.activatedAt,
     expiresAt: record.expiresAt,
     note: record.note || "",
@@ -236,6 +251,7 @@ async function handleVerifyKey(request, env) {
   const record = {
     deviceId,
     type: meta.type,
+    baseType: meta.type,
     activatedAt: activatedAt.toISOString(),
     expiresAt,
   };
@@ -431,11 +447,22 @@ async function handleAdminKeys(request, env, url) {
         : false;
       status = expiredByTime ? "expired" : "active";
     }
+    // 类型以「消耗记录」为准，清单只是出厂规格：
+    // 运营把周卡改成永久后，清单里仍是 week，但实际已是无期限卡，必须显示终身卡。
+    const recordedType = used?.type ?? null;
+    const declaredType = entry.type ?? null;
+    let type =
+      recordedType && Object.hasOwn(DURATIONS_DAYS, recordedType)
+        ? recordedType
+        : declaredType;
+    // 兼容旧数据：早期「改为永久」只清了 expiresAt、没改 type，按到期时间归一
+    if (used && !used.expiresAt) type = "lifetime";
+
     return {
       // 完整 hash 只给运营接口（需 ADMIN_TOKEN），管理页面靠它调 rebind/revoke
       hash,
       hashPrefix: hash.slice(0, 8),
-      type: entry.type ?? null,
+      type,
       status,
       deviceId: used?.deviceId ?? null,
       activatedAt: used?.activatedAt ?? null,
@@ -555,14 +582,26 @@ async function handleAdminRebind(request, env, url) {
   }
 
   // 支持显式修复到期时间（历史 bug：终身卡曾被写成 30 天）。传 expiresAt: null 表示永久。
+  // 改期限必须同时改 type，否则会出现「周卡 + 到期时间空白」这种自相矛盾的行
+  // ——运营把周卡改成永久后列表仍显示「周卡」，就是这个原因。
   if (Object.hasOwn(body, "expiresAt")) {
     if (body.expiresAt === null) {
       record.expiresAt = null;
+      record.type = "lifetime";
     } else if (
       typeof body.expiresAt === "string" &&
       !Number.isNaN(Date.parse(body.expiresAt))
     ) {
-      record.expiresAt = new Date(body.expiresAt).toISOString();
+      const next = new Date(body.expiresAt).toISOString();
+      record.expiresAt = next;
+      if (record.type === "lifetime") {
+        // 从永久改回有期限：优先恢复出厂类型，没有就按剩余天数就近归档
+        const daysLeft = (new Date(next).getTime() - Date.now()) / 86400000;
+        record.type =
+          record.baseType && record.baseType !== "lifetime"
+            ? record.baseType
+            : inferTypeFromDays(daysLeft);
+      }
     } else {
       return json({ ok: false, reason: "bad_expires_at" }, 400);
     }
@@ -580,11 +619,17 @@ async function handleAdminRebind(request, env, url) {
       return json({ ok: false, reason: "bad_extend_days" }, 400);
     }
     if (!record.expiresAt) {
-      // 终身卡没有到期时间可延，改短也没有意义
-      return json({ ok: false, reason: "already_lifetime" }, 409);
+      // 永久卡：加时间是「从今天起算的限期卡」，不是错误。
+      // 缩短永久卡没有意义，仍然拒绝。
+      if (days < 0) {
+        return json({ ok: false, reason: "already_lifetime" }, 409);
+      }
+      record.expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+      record.type = inferTypeFromDays(days);
+    } else {
+      const base = Math.max(Date.now(), new Date(record.expiresAt).getTime());
+      record.expiresAt = new Date(base + days * 86400000).toISOString();
     }
-    const base = Math.max(Date.now(), new Date(record.expiresAt).getTime());
-    record.expiresAt = new Date(base + days * 86400000).toISOString();
   }
 
   await kv.put(usedKey, JSON.stringify(record), usagePutOptions(record));
@@ -754,7 +799,8 @@ async function handleCheck(request, env) {
   return json({
     ok: true,
     status: "active",
-    type: record.type ?? null,
+    // 没有到期时间就是永久卡；旧记录可能还标着 week（历史数据），这里统一口径
+    type: record.expiresAt ? (record.type ?? null) : "lifetime",
     activatedAt: record.activatedAt ?? null,
     expiresAt: record.expiresAt ?? null,
   });

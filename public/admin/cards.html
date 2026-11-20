@@ -365,7 +365,7 @@
     token: 'xyzw_cards_token',
     base: 'xyzw_cards_base',
     mode: 'xyzw_cards_mode',
-    mock: 'xyzw_cards_mock_v5',
+    mock: 'xyzw_cards_mock_v6',
     keymap: 'xyzw_cards_keymap_v1'
   };
   var TYPES = {
@@ -381,6 +381,13 @@
     expired: { label: '已过期', cls: 'expired' },
     revoked: { label: '已停用', cls: 'revoked' }
   };
+  /** 按天数反推类型档位，与服务端 inferTypeFromDays 保持一致 */
+  function typeByDays(days) {
+    if (days <= 7) return 'week';
+    if (days <= 30) return 'month';
+    if (days <= 90) return 'quarter';
+    return 'year';
+  }
   var REASON_TEXT = {
     unauthorized: '令牌不正确',
     not_found: '管理接口未启用（没配 ADMIN_TOKEN，或配完没重新部署）',
@@ -630,10 +637,16 @@
   };
   MockProvider.prototype.extend = function (hash, days) {
     var c = this._find(hash);
-    if (c.type === 'lifetime') throw new Error(REASON_TEXT.already_lifetime);
     if (c.status === 'unused') throw new Error(REASON_TEXT.not_activated);
-    var base = Math.max(Date.now(), c.expiresAt ? new Date(c.expiresAt).getTime() : 0);
-    c.expiresAt = new Date(base + days * 86400000).toISOString();
+    if (!c.expiresAt) {
+      // 永久卡加时间 = 从今天起算的期限卡；缩短永久卡仍然拒绝
+      if (days < 0) throw new Error(REASON_TEXT.already_lifetime);
+      c.expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+      c.type = typeByDays(days);
+    } else {
+      var base = Math.max(Date.now(), new Date(c.expiresAt).getTime());
+      c.expiresAt = new Date(base + days * 86400000).toISOString();
+    }
     c.status = 'active';
     this._save();
     return Promise.resolve();
@@ -666,7 +679,16 @@
   MockProvider.prototype.setExpiry = function (hash, iso) {
     var c = this._find(hash);
     c.expiresAt = iso;
-    c.status = iso === null ? 'active' : (new Date(iso).getTime() <= Date.now() ? 'expired' : 'active');
+    if (iso === null) {
+      // 与服务端一致：改永久必须同时改类型，否则列表会出现「周卡 + 永久」的矛盾行
+      c.type = 'lifetime';
+      c.status = 'active';
+    } else {
+      if (c.type === 'lifetime') {
+        c.type = typeByDays(Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000));
+      }
+      c.status = new Date(iso).getTime() <= Date.now() ? 'expired' : 'active';
+    }
     this._save();
     return Promise.resolve();
   };
@@ -700,21 +722,29 @@
       var type = spec.type;
       var days = TYPES[type].days;
       var status = spec.status;
+      // 用 LCG 生成：原来的 (i*7 + j*13) % 16 周期性是 16，i 与 i+16 会撞出
+      // 完全相同的 hash 和明文，列表里出现两张一模一样的卡，就没法「认哪张是哪张」。
+      var seed = (i + 1) * 7919;
+      var rndHex = function () {
+        // Park-Miller：乘数 16807 保证中间结果不超过 2^53，不会因浮点丢精度
+        seed = (seed * 16807) % 2147483647;
+        return '0123456789abcdef'[seed % 16];
+      };
       var hash = '';
-      for (var j = 0; j < 64; j++) hash += '0123456789abcdef'[(i * 7 + j * 13 + 5) % 16];
+      for (var j = 0; j < 64; j++) hash += rndHex();
       // 演示数据自带一份格式合法的假明文，用来展示新的展示层；
       // 真实数据不会走到这里，只能靠导入本地明文清单建立映射。
       // 最后 2 张故意不给明文，模拟「清单里找不到原文」的真实情况。
-      var seg = function (n) {
+      var seg = function () {
         var s = '';
-        for (var q = 0; q < 6; q++) s += '0123456789abcdef'[(i * 11 + n * 29 + q * 17 + 3) % 16];
+        for (var q = 0; q < 6; q++) s += rndHex();
         return s;
       };
       var hasPlain = i < specs.length - 2;
       var item = {
         hash: hash,
         hashPrefix: hash.slice(0, 8),
-        plain: hasPlain ? 'KL-' + seg(0) + '-' + seg(1) + '-' + seg(2) : '',
+        plain: hasPlain ? 'KL-' + seg() + '-' + seg() + '-' + seg() : '',
         type: type,
         status: status,
         deviceId: null,
@@ -999,7 +1029,12 @@
     if (isUnused) {
       html += '<div class="hint">未激活的卡有效期从用户激活时起算，现在延期没有意义。</div>';
     } else if (isLifetime) {
-      html += '<div class="hint">终身卡没有到期时间，无法延期。</div>';
+      html += '<div class="row">' +
+        '<button class="btn sm" data-ext="30">+30 天</button>' +
+        '<button class="btn sm" data-ext="90">+90 天</button>' +
+        '<button class="btn sm" data-ext="365">+365 天</button>' +
+        '<button class="btn sm" id="btnCustomExt">自定义…</button>' +
+        '</div><div class="hint">永久卡加时间 = 从今天起算的期限卡，类型会按天数自动变成月卡 / 季卡 / 年卡。</div>';
     } else {
       html += '<div class="row">' +
         '<button class="btn sm" data-ext="7">+7 天</button>' +
@@ -1018,7 +1053,9 @@
       html += '<input type="date" id="expiryInput" value="' + toLocalInput(it.expiresAt) + '">';
       html += '<button class="btn sm" id="btnSetExpiry">保存</button>';
       if (!isLifetime) html += '<button class="btn sm" id="btnMakeLifetime">改为永久</button>';
-      html += '</div><div class="hint">用于补录、纠正历史数据；会比延期更直接。</div>';
+      html += '</div><div class="hint">' + (isLifetime
+        ? '永久卡填一个日期保存后会变回期限卡，类型按剩余天数自动归档。'
+        : '用于补录、纠正历史数据；会比延期更直接。') + '</div>';
       html += '<div class="hr"></div>';
     }
 
@@ -1146,8 +1183,8 @@
       return;
     }
     if (t.id === 'btnMakeLifetime') {
-      if (!confirm('改为永久有效？此操作不可自动回退（可再改回具体日期）。')) return;
-      withBusy(state.provider.setExpiry(it.hash, null), '已改为永久有效');
+      if (!confirm('改为永久有效？类型会同步变成「终身卡」，到期时间显示「永久」。')) return;
+      withBusy(state.provider.setExpiry(it.hash, null), '已改为永久卡');
       return;
     }
     if (t.id === 'btnRebind') {
