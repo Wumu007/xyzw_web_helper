@@ -637,6 +637,12 @@ describe("管理接口", () => {
       env,
     );
 
+  const adminGet = (env, path) =>
+    worker.fetch(
+      new Request(`${SITE}${path}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      env,
+    );
+
   test("停用后：即使同设备原密钥也返回 revoked（优先于幂等恢复）", async () => {
     const { env } = await seedActivation();
     const res = await adminPost(env, "/api/admin/revoke", { key: WEEK_KEY, reason: "退款" });
@@ -739,6 +745,45 @@ describe("管理接口", () => {
     });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).reason, "conflict_expires_at");
+  });
+
+  test("备注：写入后出现在全量状态里，并可清空", async () => {
+    const { env } = await seedActivation();
+    const hash = await sha256(WEEK_KEY);
+
+    const saved = await adminPost(env, "/api/admin/rebind", { hash, note: "  张三 · 手机尾号 8888  " });
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).note, "张三 · 手机尾号 8888");
+
+    let list = await adminGet(env, "/api/admin/keys");
+    let item = (await list.json()).items.find((i) => i.hash === hash);
+    assert.equal(item.note, "张三 · 手机尾号 8888");
+    // 备注不能顺带改掉别的东西
+    assert.equal(item.status, "active");
+    assert.equal(item.deviceId, "device-a");
+
+    const cleared = await adminPost(env, "/api/admin/rebind", { hash, note: "" });
+    assert.equal((await cleared.json()).note, "");
+
+    list = await adminGet(env, "/api/admin/keys");
+    item = (await list.json()).items.find((i) => i.hash === hash);
+    assert.equal(item.note, "");
+  });
+
+  test("备注过长会被截断（防止把 KV metadata 撑爆）", async () => {
+    const { env } = await seedActivation();
+    const hash = await sha256(WEEK_KEY);
+    const res = await adminPost(env, "/api/admin/rebind", { hash, note: "备".repeat(200) });
+    const body = await res.json();
+    assert.equal(body.note.length, 120);
+  });
+
+  test("全量状态返回完整 hash，供管理页面直接调用运营接口", async () => {
+    const { env } = await seedActivation();
+    const res = await adminGet(env, "/api/admin/keys");
+    const item = (await res.json()).items[0];
+    assert.match(item.hash, /^[0-9a-f]{64}$/);
+    assert.equal(item.hash.slice(0, 8), item.hashPrefix);
   });
 });
 

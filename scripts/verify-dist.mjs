@@ -92,7 +92,21 @@ if (!inDist('access-keys.json')) {
   }
 }
 
-// ---------- 4. 前端资源分片 ----------
+// ---------- 4. 管理页面 ----------
+if (!inDist('admin/cards.html')) {
+  fail('dist/admin/cards.html 缺失：卡密管理页面将 404');
+} else {
+  const page = read(join(dist, 'admin', 'cards.html'));
+  if (page.includes('卡密管理')) ok('admin/cards.html 内容正常');
+  else fail('admin/cards.html 内容异常（缺少标题文案）');
+
+  const apis = ['/api/admin/keys', '/api/admin/rebind', '/api/admin/revoke'];
+  const lack = apis.filter((api) => !page.includes(api));
+  if (lack.length) warn(`admin/cards.html 未引用接口：${lack.join(', ')}`);
+  else ok('admin/cards.html 引用了管理接口');
+}
+
+// ---------- 5. 前端资源分片 ----------
 const assetsDir = join(dist, 'assets');
 if (!existsSync(assetsDir)) {
   fail('dist/assets 目录缺失：前端脚本/样式未产出');
@@ -100,7 +114,7 @@ if (!existsSync(assetsDir)) {
   ok('dist/assets 目录存在');
 }
 
-// ---------- 5. 关键产物不全时的假存活提示 ----------
+// ---------- 6. 关键产物不全时的假存活提示 ----------
 if (!inDist('access-keys.json') || !inDist('_worker.js')) {
   warn('关键产物不全，Pages 端可能出现「首页正常但功能失灵」的假存活');
 }

@@ -103,6 +103,7 @@ function recordMetadata(record) {
     type: record.type,
     activatedAt: record.activatedAt,
     expiresAt: record.expiresAt,
+    note: record.note || "",
   };
 }
 
@@ -314,6 +315,8 @@ async function scanUsage(kv) {
           deviceId: hasMeta ? (meta.deviceId ?? null) : (record?.deviceId ?? null),
           activatedAt: hasMeta ? (meta.activatedAt ?? null) : (record?.activatedAt ?? null),
           expiresAt: hasMeta ? (meta.expiresAt ?? null) : (record?.expiresAt ?? null),
+          // 人工备注（谁在用这张卡），由 /api/admin/rebind 写入
+          note: hasMeta ? (meta.note ?? "") : (record?.note ?? ""),
           // KV 记录自身的过期时间 = 卡到期 + 1 天缓冲，不是卡到期时间
           kvExpiresAt: entry.expiration
             ? new Date(entry.expiration * 1000).toISOString()
@@ -429,6 +432,8 @@ async function handleAdminKeys(request, env, url) {
       status = expiredByTime ? "expired" : "active";
     }
     return {
+      // 完整 hash 只给运营接口（需 ADMIN_TOKEN），管理页面靠它调 rebind/revoke
+      hash,
       hashPrefix: hash.slice(0, 8),
       type: entry.type ?? null,
       status,
@@ -438,6 +443,7 @@ async function handleAdminKeys(request, env, url) {
       daysLeft: used?.expiresAt
         ? Math.ceil((new Date(used.expiresAt).getTime() - now) / 86400000)
         : null,
+      note: used?.note ?? "",
       legacy: used?.legacy ?? false,
     };
   });
@@ -505,6 +511,12 @@ async function handleAdminRebind(request, env, url) {
       ? null
       : String(body.deviceId).slice(0, 64);
 
+  // 备注（谁在用这张卡）：传字符串即写入，传空字符串即清空，不传即不动。
+  const nextNote =
+    body?.note === undefined || body?.note === null
+      ? null
+      : String(body.note).trim().slice(0, 120);
+
   if (!key && !/^[0-9a-f]{64}$/.test(hashInput)) {
     return json({ ok: false, reason: "bad_request" }, 400);
   }
@@ -536,6 +548,10 @@ async function handleAdminRebind(request, env, url) {
 
   if (nextDeviceId !== null) {
     record.deviceId = nextDeviceId;
+  }
+
+  if (nextNote !== null) {
+    record.note = nextNote;
   }
 
   // 支持显式修复到期时间（历史 bug：终身卡曾被写成 30 天）。传 expiresAt: null 表示永久。
@@ -580,6 +596,7 @@ async function handleAdminRebind(request, env, url) {
     deviceId: record.deviceId ?? null,
     activatedAt: record.activatedAt ?? null,
     expiresAt: record.expiresAt ?? null,
+    note: record.note ?? "",
     expired: record.expiresAt ? new Date(record.expiresAt).getTime() < Date.now() : false,
   });
 }

@@ -1,0 +1,1019 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>卡密管理</title>
+<style>
+  :root{
+    --bg:#f4f6f9;
+    --surface:#ffffff;
+    --surface-2:#f8fafc;
+    --line:#e4e8ef;
+    --text:#1b2333;
+    --muted:#6b7280;
+    --accent:#2563eb;
+    --accent-soft:#eaf1ff;
+    --green:#15803d; --green-soft:#e8f6ec;
+    --amber:#b45309; --amber-soft:#fdf2e0;
+    --red:#b91c1c;   --red-soft:#fdeaea;
+    --slate:#475569; --slate-soft:#eef1f5;
+    --radius:12px;
+    --shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 24px rgba(16,24,40,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button,input,select,textarea{font:inherit;color:inherit}
+  button{cursor:pointer}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+
+  /* ---------- 顶栏 ---------- */
+  header{
+    position:sticky; top:0; z-index:20; background:rgba(255,255,255,.92);
+    backdrop-filter:saturate(180%) blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .bar{max-width:1180px; margin:0 auto; padding:14px 20px; display:flex; align-items:center; gap:12px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:650; letter-spacing:.2px}
+  .logo{
+    width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#2563eb,#7c3aed);
+    display:grid;place-items:center;color:#fff;font-size:13px;font-weight:700
+  }
+  .badge{
+    font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line);
+    background:var(--surface-2); color:var(--muted); white-space:nowrap
+  }
+  .badge.live{background:var(--green-soft); color:var(--green); border-color:#cbe8d3}
+  .badge.demo{background:var(--amber-soft); color:var(--amber); border-color:#f3ddb8}
+  .spacer{flex:1}
+  .btn{
+    border:1px solid var(--line); background:var(--surface); color:var(--text);
+    padding:7px 13px; border-radius:9px; transition:.15s; white-space:nowrap
+  }
+  .btn:hover{background:var(--surface-2); border-color:#d3dae5}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{background:#1d4ed8}
+  .btn.ghost{border-color:transparent; background:transparent; color:var(--muted)}
+  .btn.ghost:hover{background:var(--surface-2); color:var(--text)}
+  .btn.danger{color:var(--red); border-color:#f0cccc; background:var(--red-soft)}
+  .btn.danger:hover{background:#fbdede}
+  .btn:disabled{opacity:.45; cursor:not-allowed}
+  .btn.sm{padding:5px 10px; font-size:13px; border-radius:8px}
+
+  /* ---------- 主体 ---------- */
+  main{max-width:1180px; margin:0 auto; padding:20px}
+
+  .stats{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:18px}
+  .stat{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    padding:14px 16px; box-shadow:var(--shadow)
+  }
+  .stat .k{font-size:12px; color:var(--muted); margin-bottom:6px; white-space:nowrap}
+  .stat .v{font-size:24px; font-weight:660; letter-spacing:-.3px}
+  .stat .v.muted{color:#9aa3b2; font-weight:600}
+  .stat.used .v{color:var(--accent)}
+  .stat.active .v{color:var(--green)}
+  .stat.expired .v{color:var(--amber)}
+  .stat.revoked .v{color:var(--red)}
+
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden}
+  .toolbar{display:flex; gap:10px; align-items:center; padding:14px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap}
+  .search{position:relative; flex:1; min-width:220px}
+  .search input{
+    width:100%; padding:8px 12px 8px 34px; border:1px solid var(--line); border-radius:9px;
+    background:var(--surface-2); outline:none; transition:.15s
+  }
+  .search input:focus{border-color:#b9cdf7; background:#fff; box-shadow:0 0 0 3px var(--accent-soft)}
+  .search svg{position:absolute; left:11px; top:50%; transform:translateY(-50%); color:#9aa3b2}
+  select{
+    padding:8px 30px 8px 11px; border:1px solid var(--line); border-radius:9px;
+    background:var(--surface-2) url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+    appearance:none; outline:none
+  }
+  select:focus{border-color:#b9cdf7; background-color:#fff; box-shadow:0 0 0 3px var(--accent-soft)}
+  .count{font-size:12.5px; color:var(--muted); margin-left:auto; white-space:nowrap}
+
+  /* ---------- 表格 ---------- */
+  .table-wrap{width:100%; overflow-x:auto}
+  table{width:100%; border-collapse:collapse; font-size:13.5px}
+  thead th{
+    text-align:left; font-weight:600; font-size:12.5px; color:var(--muted);
+    background:var(--surface-2); padding:10px 14px; border-bottom:1px solid var(--line); white-space:nowrap
+  }
+  tbody td{padding:11px 14px; border-bottom:1px solid #f0f2f6; vertical-align:middle}
+  tbody tr{cursor:pointer; transition:background .12s}
+  tbody tr:hover{background:#fafbff}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr.selected{background:var(--accent-soft)}
+  .key{font-weight:600; letter-spacing:.2px}
+  .sub{font-size:12px; color:var(--muted); margin-top:2px}
+  .note{max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#334155}
+  .note.empty{color:#b6bdc9}
+  .muted{color:var(--muted)}
+  .pill{
+    display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600;
+    padding:3px 9px; border-radius:999px; white-space:nowrap
+  }
+  .pill::before{content:""; width:6px; height:6px; border-radius:50%; background:currentColor; opacity:.85}
+  .pill.unused{color:var(--slate); background:var(--slate-soft)}
+  .pill.active{color:var(--green); background:var(--green-soft)}
+  .pill.expired{color:var(--amber); background:var(--amber-soft)}
+  .pill.revoked{color:var(--red); background:var(--red-soft)}
+  .tag{font-size:12px; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); padding:2px 7px; border-radius:6px}
+
+  .empty{padding:56px 20px; text-align:center; color:var(--muted)}
+  .empty .big{font-size:15px; color:#3d4657; margin-bottom:6px}
+
+  /* ---------- 抽屉 ---------- */
+  .overlay{
+    position:fixed; inset:0; background:rgba(17,24,39,.32); opacity:0; pointer-events:none;
+    transition:opacity .18s; z-index:40
+  }
+  .overlay.show{opacity:1; pointer-events:auto}
+  .drawer{
+    position:fixed; top:0; right:0; height:100%; width:440px; max-width:92vw; background:var(--surface);
+    border-left:1px solid var(--line); box-shadow:-12px 0 32px rgba(16,24,40,.12);
+    transform:translateX(100%); transition:transform .22s cubic-bezier(.4,0,.2,1); z-index:41;
+    display:flex; flex-direction:column
+  }
+  .drawer.show{transform:translateX(0)}
+  .drawer-head{padding:16px 18px; border-bottom:1px solid var(--line); display:flex; align-items:flex-start; gap:10px}
+  .drawer-head h2{margin:0; font-size:15px; font-weight:650}
+  .drawer-body{padding:16px 18px; overflow-y:auto; flex:1}
+  .drawer-foot{padding:14px 18px; border-top:1px solid var(--line); display:flex; gap:8px; justify-content:flex-end; background:var(--surface-2)}
+  .kv{display:grid; grid-template-columns:88px 1fr; gap:8px 12px; font-size:13px; margin-bottom:18px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0; word-break:break-all}
+  .sect-title{font-size:12.5px; font-weight:650; color:var(--muted); text-transform:none; letter-spacing:.3px; margin:0 0 8px}
+  textarea{
+    width:100%; min-height:68px; resize:vertical; padding:9px 11px; border:1px solid var(--line);
+    border-radius:9px; background:var(--surface-2); outline:none; transition:.15s
+  }
+  textarea:focus{border-color:#b9cdf7; background:#fff; box-shadow:0 0 0 3px var(--accent-soft)}
+  .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  .hr{height:1px; background:var(--line); margin:16px 0}
+  .hint{font-size:12px; color:var(--muted); margin-top:6px}
+  input[type=number],input[type=date],input[type=text]{
+    padding:7px 10px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); outline:none
+  }
+  input[type=number]{width:78px}
+  input[type=text]:focus,input[type=number]:focus,input[type=date]:focus{border-color:#b9cdf7; background:#fff}
+  .danger-zone{border:1px solid #f3dada; background:#fffafa; border-radius:10px; padding:12px 14px}
+  .danger-zone .sect-title{color:var(--red)}
+
+  /* ---------- 弹窗 ---------- */
+  .dialog{
+    position:fixed; inset:0; z-index:60; display:none; place-items:center; padding:20px;
+    background:rgba(17,24,39,.36)
+  }
+  .dialog.show{display:grid}
+  .dialog-card{
+    width:460px; max-width:100%; background:var(--surface); border-radius:14px; box-shadow:0 24px 60px rgba(16,24,40,.25);
+    overflow:hidden
+  }
+  .dialog-card h3{margin:0; padding:16px 18px 10px; font-size:15px}
+  .dialog-card .body{padding:0 18px 4px}
+  .dialog-card label{display:block; font-size:12.5px; color:var(--muted); margin:12px 0 6px}
+  .dialog-card input{width:100%}
+  .dialog-card .foot{padding:14px 18px 16px; display:flex; gap:8px; justify-content:flex-end}
+  .dialog-note{font-size:12px; color:var(--muted); margin-top:10px; line-height:1.6}
+
+  /* ---------- toast ---------- */
+  #toasts{position:fixed; right:20px; bottom:20px; z-index:80; display:flex; flex-direction:column; gap:8px}
+  .toast{
+    min-width:200px; max-width:340px; padding:10px 14px; border-radius:10px; font-size:13px;
+    background:#1f2937; color:#fff; box-shadow:0 10px 30px rgba(0,0,0,.18);
+    animation:in .18s ease-out
+  }
+  .toast.ok{background:#14532d}
+  .toast.err{background:#7f1d1d}
+  @keyframes in{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+
+  .loading{opacity:.6; pointer-events:none}
+  @media (max-width:900px){
+    .stats{grid-template-columns:repeat(3,1fr)}
+    .col-device,.col-activated{display:none}
+  }
+  @media (max-width:620px){
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .col-expire{display:none}
+    .bar{padding:12px 14px}
+    main{padding:14px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand"><span class="logo">K</span>卡密管理</div>
+    <span id="modeBadge" class="badge">加载中</span>
+    <span class="spacer"></span>
+    <button class="btn" id="btnRefresh">刷新</button>
+    <button class="btn" id="btnSettings">设置</button>
+  </div>
+</header>
+
+<main>
+  <section class="stats" id="stats"></section>
+
+  <section class="panel">
+    <div class="toolbar">
+      <div class="search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/></svg>
+        <input id="q" type="search" placeholder="搜索卡密前缀 / 备注 / 设备 ID（按 / 聚焦）" autocomplete="off">
+      </div>
+      <select id="fType" aria-label="按类型筛选">
+        <option value="all">全部类型</option>
+        <option value="week">周卡</option>
+        <option value="month">月卡</option>
+        <option value="quarter">季卡</option>
+        <option value="year">年卡</option>
+        <option value="lifetime">终身卡</option>
+      </select>
+      <select id="fStatus" aria-label="按状态筛选">
+        <option value="all">全部状态</option>
+        <option value="active">生效中</option>
+        <option value="expired">已过期</option>
+        <option value="unused">未使用</option>
+        <option value="revoked">已停用</option>
+      </select>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:150px">卡密</th>
+            <th style="width:96px">状态</th>
+            <th style="width:80px">类型</th>
+            <th class="col-expire" style="width:132px">到期</th>
+            <th class="col-expire" style="width:76px">剩余</th>
+            <th class="col-device" style="width:110px">设备</th>
+            <th>备注（谁在用）</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty" hidden>
+        <div class="big">没有符合条件的卡</div>
+        <div>换个关键词，或把筛选条件改回「全部」</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer" aria-label="卡片详情">
+  <div class="drawer-head">
+    <div style="flex:1">
+      <h2 id="dTitle" class="mono">-</h2>
+      <div class="sub" id="dSub"></div>
+    </div>
+    <button class="btn ghost sm" id="btnClose">关闭</button>
+  </div>
+  <div class="drawer-body" id="dBody"></div>
+</aside>
+
+<div class="dialog" id="settings">
+  <div class="dialog-card">
+    <h3>数据来源</h3>
+    <div class="body">
+      <label for="apiBase">接口地址</label>
+      <input id="apiBase" type="text" placeholder="https://xyzw-web-helper-2dx.pages.dev" autocomplete="off">
+      <label for="apiToken">管理令牌（ADMIN_TOKEN）</label>
+      <input id="apiToken" type="password" placeholder="留空则使用演示数据" autocomplete="off">
+      <div class="dialog-note">
+        令牌只保存在本浏览器的 localStorage，不会上传到任何地方。<br>
+        页面与接口同源部署时，只需填令牌；从本地文件打开则需要填写完整接口地址。
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn" id="btnDemo">使用演示数据</button>
+      <button class="btn primary" id="btnSaveConn">测试并保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+   * 1. 常量与工具
+   * ============================================================ */
+  var LS = {
+    token: 'xyzw_cards_token',
+    base: 'xyzw_cards_base',
+    mode: 'xyzw_cards_mode',
+    mock: 'xyzw_cards_mock_v3'
+  };
+  var TYPES = {
+    week: { label: '周卡', days: 7 },
+    month: { label: '月卡', days: 30 },
+    quarter: { label: '季卡', days: 90 },
+    year: { label: '年卡', days: 365 },
+    lifetime: { label: '终身卡', days: null }
+  };
+  var STATUS = {
+    unused: { label: '未使用', cls: 'unused' },
+    active: { label: '生效中', cls: 'active' },
+    expired: { label: '已过期', cls: 'expired' },
+    revoked: { label: '已停用', cls: 'revoked' }
+  };
+  var REASON_TEXT = {
+    unauthorized: '令牌不正确',
+    not_found: '管理接口未启用（没配 ADMIN_TOKEN，或配完没重新部署）',
+    bad_request: '参数不完整',
+    not_activated: '这张卡还没被激活，没有有效期可改',
+    already_lifetime: '终身卡没有到期时间，不能延期',
+    bad_extend_days: '天数不合法（不能为 0，且不超过 3650）',
+    conflict_expires_at: '延期和改到期日不能同时进行',
+    kv_unavailable: 'KV 绑定缺失，请到 Cloudflare 检查 ACCESS_KV',
+    config_unavailable: '服务端读不到卡密清单',
+    record_corrupt: 'KV 里的记录已损坏'
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtDate(iso) {
+    if (!iso) return '-';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '-';
+    var p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function toLocalInput(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    var p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  function daysText(item) {
+    if (item.type === 'lifetime') return '永久';
+    if (item.daysLeft === null || item.daysLeft === undefined) return '-';
+    if (item.daysLeft < 0) return '已过期 ' + Math.abs(item.daysLeft) + ' 天';
+    return item.daysLeft + ' 天';
+  }
+  function toast(msg, kind) {
+    var el = document.createElement('div');
+    el.className = 'toast ' + (kind || '');
+    el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(function () {
+      el.style.transition = 'opacity .2s';
+      el.style.opacity = '0';
+      setTimeout(function () { el.remove(); }, 220);
+    }, kind === 'err' ? 4200 : 2400);
+  }
+  function reasonOf(res, data) {
+    if (res.status === 401) return REASON_TEXT.unauthorized;
+    if (res.status === 404) return REASON_TEXT.not_found;
+    var r = data && data.reason;
+    return (r && REASON_TEXT[r]) || r || ('HTTP ' + res.status);
+  }
+
+  /* ============================================================
+   * 2. 数据层
+   *    两个实现共用同一个接口，切换时 UI 不用改：
+   *      list()                       -> { summary, items }
+   *      extend(hash, days)           -> void
+   *      setNote(hash, note)          -> void
+   *      revoke(hash, reason)         -> void
+   *      unrevoke(hash)               -> void
+   *      rebind(hash, deviceId)       -> void
+   *      setExpiry(hash, iso|null)    -> void
+   * ============================================================ */
+
+  /* ---- 2.1 演示数据 ---- */
+  function MockProvider() {
+    this.cards = this._load();
+  }
+  MockProvider.prototype._load = function () {
+    try {
+      var raw = localStorage.getItem(LS.mock);
+      if (raw) {
+        var arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length) return arr;
+      }
+    } catch (e) { /* 忽略损坏的缓存，重建 */ }
+    var seeded = seedCards();
+    this.cards = seeded;
+    this._save();
+    return seeded;
+  };
+  MockProvider.prototype._save = function () {
+    try { localStorage.setItem(LS.mock, JSON.stringify(this.cards)); } catch (e) { /* 配额满就算了 */ }
+  };
+  MockProvider.prototype._find = function (hash) {
+    var hit = this.cards.filter(function (c) { return c.hash === hash; })[0];
+    if (!hit) throw new Error('演示数据里找不到这张卡');
+    return hit;
+  };
+  MockProvider.prototype._decorate = function (c) {
+    var now = Date.now();
+    if (c.type === 'lifetime') {
+      // 终身卡永远不过期，也不该有剩余天数
+      c.expiresAt = null;
+      c.daysLeft = null;
+      if (c.status === 'expired') c.status = c.activatedAt ? 'active' : 'unused';
+      return c;
+    }
+    if (c.status === 'active' && c.expiresAt && new Date(c.expiresAt).getTime() <= now) c.status = 'expired';
+    if (c.expiresAt) c.daysLeft = Math.ceil((new Date(c.expiresAt).getTime() - now) / 86400000);
+    return c;
+  };
+  MockProvider.prototype.list = function () {
+    var self = this;
+    var items = this.cards.map(function (c) { return self._decorate(Object.assign({}, c)); });
+    var summary = { total: items.length, unused: 0, active: 0, expired: 0, revoked: 0 };
+    items.forEach(function (i) { summary[i.status] = (summary[i.status] || 0) + 1; });
+    return Promise.resolve({ summary: summary, items: items, mock: true });
+  };
+  MockProvider.prototype.extend = function (hash, days) {
+    var c = this._find(hash);
+    if (c.type === 'lifetime') throw new Error(REASON_TEXT.already_lifetime);
+    if (c.status === 'unused') throw new Error(REASON_TEXT.not_activated);
+    var base = Math.max(Date.now(), c.expiresAt ? new Date(c.expiresAt).getTime() : 0);
+    c.expiresAt = new Date(base + days * 86400000).toISOString();
+    c.status = 'active';
+    this._save();
+    return Promise.resolve();
+  };
+  MockProvider.prototype.setNote = function (hash, note) {
+    var c = this._find(hash);
+    c.note = String(note || '').slice(0, 120);
+    this._save();
+    return Promise.resolve();
+  };
+  MockProvider.prototype.revoke = function (hash) {
+    var c = this._find(hash);
+    c.status = 'revoked';
+    this._save();
+    return Promise.resolve();
+  };
+  MockProvider.prototype.unrevoke = function (hash) {
+    var c = this._find(hash);
+    var now = Date.now();
+    if (!c.activatedAt) c.status = 'unused';
+    else c.status = (c.expiresAt && new Date(c.expiresAt).getTime() <= now) ? 'expired' : 'active';
+    this._save();
+    return Promise.resolve();
+  };
+  MockProvider.prototype.rebind = function (hash, deviceId) {
+    this._find(hash).deviceId = deviceId;
+    this._save();
+    return Promise.resolve();
+  };
+  MockProvider.prototype.setExpiry = function (hash, iso) {
+    var c = this._find(hash);
+    c.expiresAt = iso;
+    c.status = iso === null ? 'active' : (new Date(iso).getTime() <= Date.now() ? 'expired' : 'active');
+    this._save();
+    return Promise.resolve();
+  };
+
+  function seedCards() {
+    var now = Date.now();
+    var DAY = 86400000;
+    var finite = ['week', 'month', 'quarter', 'year'];
+    var names = [
+      '张三 · 138****8888',
+      '李四 · 微信 lisi_88',
+      '王五 · 手机 139****2233',
+      '赵六 · 朋友介绍',
+      '孙七 · 淘宝订单 20261118001',
+      '周八 · 手机 137****5566'
+    ];
+    // 按「状态 + 类型」显式编排，避免出现「终身卡已过期」这类矛盾数据
+    var specs = [];
+    var i;
+    for (i = 0; i < 10; i++) specs.push({ status: 'active', type: finite[i % 4] });
+    specs.push({ status: 'active', type: 'lifetime' });
+    specs.push({ status: 'active', type: 'lifetime' });
+    for (i = 0; i < 4; i++) specs.push({ status: 'expired', type: finite[i % 4] });
+    specs.push({ status: 'revoked', type: 'month' });
+    specs.push({ status: 'revoked', type: 'lifetime' });
+    for (i = 0; i < 24; i++) specs.push({ status: 'unused', type: finite.concat(['lifetime'])[i % 5] });
+
+    var out = [];
+    for (i = 0; i < specs.length; i++) {
+      var spec = specs[i];
+      var type = spec.type;
+      var days = TYPES[type].days;
+      var status = spec.status;
+      var hash = '';
+      for (var j = 0; j < 64; j++) hash += '0123456789abcdef'[(i * 7 + j * 13 + 5) % 16];
+      var item = {
+        hash: hash,
+        hashPrefix: hash.slice(0, 8),
+        type: type,
+        status: status,
+        deviceId: null,
+        activatedAt: null,
+        expiresAt: null,
+        daysLeft: null,
+        note: '',
+        legacy: false
+      };
+      if (status !== 'unused') {
+        item.deviceId = 'dev' + hash.slice(0, 10);
+        item.note = names[i % names.length];
+      }
+      if (status === 'active') {
+        // 已激活天数必须小于有效期，否则会被 _decorate 判定为过期
+        var agoDays = days === null ? 20 : Math.min(Math.max(1, Math.floor(days / 4)), 1 + (i % 4));
+        item.activatedAt = new Date(now - agoDays * DAY).toISOString();
+        item.expiresAt = days === null ? null : new Date(now + (days - agoDays) * DAY).toISOString();
+      } else if (status === 'expired') {
+        var overDays = 2 + (i % 6);
+        item.activatedAt = new Date(now - (days + overDays) * DAY).toISOString();
+        item.expiresAt = new Date(now - overDays * DAY).toISOString();
+        item.note = '老客户 · 已过期待续费';
+      } else if (status === 'revoked') {
+        item.activatedAt = new Date(now - 3 * DAY).toISOString();
+        item.expiresAt = days === null ? null : new Date(now + (days - 3) * DAY).toISOString();
+        item.note = '退款 · 20261115 作废';
+      }
+      out.push(item);
+    }
+    return out;
+  }
+
+  /* ---- 2.2 真实接口 ---- */
+  function HttpProvider(base, token) {
+    this.base = String(base || '').replace(/\/+$/, '');
+    this.token = token;
+  }
+  HttpProvider.prototype._req = function (path, opts) {
+    opts = opts || {};
+    var self = this;
+    return fetch(this.base + path, {
+      method: opts.method || 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + this.token,
+        'Content-Type': 'application/json'
+      },
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+        if (!res.ok || (data && data.ok === false)) {
+          var err = new Error(reasonOf(res, data));
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      });
+    }).catch(function (e) {
+      if (e && e.status) throw e;
+      // 网络层失败（离线、CORS、地址填错）
+      var err = new Error('连不上接口：' + (self.base || '同源地址'));
+      err.status = 0;
+      throw err;
+    });
+  };
+  HttpProvider.prototype.list = function () {
+    return this._req('/api/admin/keys').then(function (d) {
+      return { summary: d.summary, items: d.items || [] };
+    });
+  };
+  HttpProvider.prototype.extend = function (hash, days) {
+    return this._req('/api/admin/rebind', { method: 'POST', body: { hash: hash, extendDays: days } });
+  };
+  HttpProvider.prototype.setNote = function (hash, note) {
+    return this._req('/api/admin/rebind', { method: 'POST', body: { hash: hash, note: note } });
+  };
+  HttpProvider.prototype.revoke = function (hash, reason) {
+    return this._req('/api/admin/revoke', { method: 'POST', body: { hash: hash, reason: reason || '' } });
+  };
+  HttpProvider.prototype.unrevoke = function (hash) {
+    return this._req('/api/admin/unrevoke', { method: 'POST', body: { hash: hash } });
+  };
+  HttpProvider.prototype.rebind = function (hash, deviceId) {
+    return this._req('/api/admin/rebind', { method: 'POST', body: { hash: hash, deviceId: deviceId } });
+  };
+  HttpProvider.prototype.setExpiry = function (hash, iso) {
+    return this._req('/api/admin/rebind', { method: 'POST', body: { hash: hash, expiresAt: iso } });
+  };
+
+  /* ============================================================
+   * 3. 应用状态
+   * ============================================================ */
+  var state = {
+    provider: null,
+    mode: 'mock',
+    items: [],
+    summary: { total: 0, unused: 0, active: 0, expired: 0, revoked: 0 },
+    q: '',
+    type: 'all',
+    status: 'all',
+    selected: null,
+    busy: false
+  };
+
+  function currentBase() { return localStorage.getItem(LS.base) || location.origin; }
+  function currentToken() { return localStorage.getItem(LS.token) || ''; }
+
+  function setMode(mode) {
+    state.mode = mode;
+    localStorage.setItem(LS.mode, mode);
+    var badge = $('modeBadge');
+    if (mode === 'http') {
+      badge.textContent = '线上数据';
+      badge.className = 'badge live';
+    } else {
+      badge.textContent = '演示数据';
+      badge.className = 'badge demo';
+    }
+  }
+
+  function initProvider() {
+    var token = currentToken();
+    var mode = localStorage.getItem(LS.mode) || (token ? 'http' : 'mock');
+    if (mode === 'http' && !token) mode = 'mock';
+    state.provider = mode === 'http' ? new HttpProvider(currentBase(), token) : new MockProvider();
+    setMode(mode);
+  }
+
+  /* ============================================================
+   * 4. 渲染
+   * ============================================================ */
+  function filtered() {
+    var q = state.q.trim().toLowerCase();
+    return state.items.filter(function (it) {
+      if (state.type !== 'all' && it.type !== state.type) return false;
+      if (state.status !== 'all' && it.status !== state.status) return false;
+      if (!q) return true;
+      var hay = [
+        it.hashPrefix, it.hash, it.note || '', it.deviceId || '',
+        (TYPES[it.type] || {}).label || it.type,
+        (STATUS[it.status] || {}).label || it.status
+      ].join(' ').toLowerCase();
+      return hay.indexOf(q) > -1;
+    });
+  }
+
+  function renderStats() {
+    var s = state.summary;
+    var used = (s.active || 0) + (s.expired || 0) + (s.revoked || 0);
+    var tiles = [
+      { k: '总卡数', v: s.total || 0, cls: '' },
+      { k: '已使用', v: used, cls: 'used' },
+      { k: '生效中', v: s.active || 0, cls: 'active' },
+      { k: '未使用', v: s.unused || 0, cls: '' },
+      { k: '已过期', v: s.expired || 0, cls: 'expired' },
+      { k: '已停用', v: s.revoked || 0, cls: 'revoked' }
+    ];
+    $('stats').innerHTML = tiles.map(function (t) {
+      return '<div class="stat ' + t.cls + '"><div class="k">' + t.k + '</div><div class="v">' + t.v + '</div></div>';
+    }).join('');
+  }
+
+  function renderRows() {
+    var list = filtered();
+    $('count').textContent = '显示 ' + list.length + ' / ' + state.items.length + ' 张';
+    var tbody = $('rows');
+    if (!list.length) {
+      tbody.innerHTML = '';
+      $('empty').hidden = false;
+      return;
+    }
+    $('empty').hidden = true;
+    tbody.innerHTML = list.map(function (it) {
+      var st = STATUS[it.status] || { label: it.status, cls: 'unused' };
+      var type = TYPES[it.type] || { label: it.type };
+      var sel = state.selected && state.selected.hash === it.hash ? ' selected' : '';
+      var note = it.note
+        ? '<span class="note" title="' + esc(it.note) + '">' + esc(it.note) + '</span>'
+        : '<span class="note empty">' + (it.status === 'unused' ? '未使用' : '点击添加备注') + '</span>';
+      return '<tr data-hash="' + esc(it.hash) + '" class="' + sel.trim() + '">' +
+        '<td><div class="key mono">' + esc(it.hashPrefix) + '</div><div class="sub mono">' + esc(it.hash.slice(8, 16)) + '…</div></td>' +
+        '<td><span class="pill ' + st.cls + '">' + st.label + '</span></td>' +
+        '<td><span class="tag">' + type.label + '</span></td>' +
+        '<td class="col-expire">' + (it.type === 'lifetime' ? '<span class="muted">永久</span>' : fmtDate(it.expiresAt)) + '</td>' +
+        '<td class="col-expire">' + (it.status === 'unused' ? '<span class="muted">-</span>' : daysText(it)) + '</td>' +
+        '<td class="col-device mono muted">' + (it.deviceId ? esc(it.deviceId.slice(0, 8)) + '…' : '-') + '</td>' +
+        '<td>' + note + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function renderDrawer() {
+    var it = state.selected;
+    var drawer = $('drawer');
+    var overlay = $('overlay');
+    if (!it) {
+      drawer.classList.remove('show');
+      overlay.classList.remove('show');
+      return;
+    }
+    drawer.classList.add('show');
+    overlay.classList.add('show');
+
+    var st = STATUS[it.status] || { label: it.status, cls: 'unused' };
+    var type = TYPES[it.type] || { label: it.type };
+    var isUnused = it.status === 'unused';
+    var isLifetime = it.type === 'lifetime';
+
+    $('dTitle').textContent = it.hashPrefix;
+    $('dSub').innerHTML = '<span class="pill ' + st.cls + '">' + st.label + '</span> <span class="tag">' + type.label + '</span>';
+
+    var html = '';
+    html += '<dl class="kv">';
+    html += '<dt>完整 hash</dt><dd class="mono" style="font-size:12px;color:#475569">' + esc(it.hash) + '</dd>';
+    html += '<dt>到期时间</dt><dd>' + (isLifetime ? '永久有效' : (it.expiresAt ? fmtDate(it.expiresAt) : '-')) + '</dd>';
+    html += '<dt>剩余</dt><dd>' + (isUnused ? '-' : daysText(it)) + '</dd>';
+    html += '<dt>激活时间</dt><dd>' + fmtDate(it.activatedAt) + '</dd>';
+    html += '<dt>设备 ID</dt><dd class="mono" style="font-size:12px">' + (it.deviceId ? esc(it.deviceId) : '-') + '</dd>';
+    html += '</dl>';
+
+    // 备注
+    html += '<p class="sect-title">备注（谁在用这张卡）</p>';
+    if (isUnused) {
+      html += '<div class="hint">这张卡还没被激活，暂不需要备注。等用户激活后再来标注即可。</div>';
+    } else {
+      html += '<textarea id="noteInput" maxlength="120" placeholder="例如：张三 · 手机尾号 8888 · 2026-11-20 购买">' + esc(it.note || '') + '</textarea>';
+      html += '<div class="row" style="margin-top:8px"><button class="btn sm primary" id="btnSaveNote">保存备注</button>' +
+        '<span class="hint" id="noteHint">' + (it.note ? '' : '留空即清除') + '</span></div>';
+    }
+
+    html += '<div class="hr"></div>';
+
+    // 延期
+    html += '<p class="sect-title">延期 / 缩短</p>';
+    if (isUnused) {
+      html += '<div class="hint">未激活的卡有效期从用户激活时起算，现在延期没有意义。</div>';
+    } else if (isLifetime) {
+      html += '<div class="hint">终身卡没有到期时间，无法延期。</div>';
+    } else {
+      html += '<div class="row">' +
+        '<button class="btn sm" data-ext="7">+7 天</button>' +
+        '<button class="btn sm" data-ext="30">+30 天</button>' +
+        '<button class="btn sm" data-ext="90">+90 天</button>' +
+        '<button class="btn sm" data-ext="-7">-7 天</button>' +
+        '<button class="btn sm" id="btnCustomExt">自定义…</button>' +
+        '</div><div class="hint">延长以「原到期日」为基准；已过期的从今天重新起算完整天数。</div>';
+    }
+
+    html += '<div class="hr"></div>';
+
+    // 改到期日
+    if (!isUnused) {
+      html += '<p class="sect-title">直接改到期日</p><div class="row">';
+      html += '<input type="date" id="expiryInput" value="' + toLocalInput(it.expiresAt) + '">';
+      html += '<button class="btn sm" id="btnSetExpiry">保存</button>';
+      if (!isLifetime) html += '<button class="btn sm" id="btnMakeLifetime">改为永久</button>';
+      html += '</div><div class="hint">用于补录、纠正历史数据；会比延期更直接。</div>';
+      html += '<div class="hr"></div>';
+    }
+
+    // 换绑
+    if (!isUnused) {
+      html += '<p class="sect-title">换绑设备</p><div class="row">';
+      html += '<input type="text" id="deviceInput" placeholder="新设备 ID" style="flex:1" value="">';
+      html += '<button class="btn sm" id="btnRebind">换绑</button></div>';
+      html += '<div class="hint">保留原有效期、不重新计时；旧设备下次复核会被踢回验证页。</div>';
+      html += '<div class="hr"></div>';
+    }
+
+    // 停用 / 启用
+    html += '<div class="danger-zone"><p class="sect-title">' + (it.status === 'revoked' ? '已停用' : '停用（作废）') + '</p>';
+    if (it.status === 'revoked') {
+      html += '<div class="hint" style="margin-bottom:8px">这张卡现在被拒绝使用。撤销后会回到停用前的状态和原有效期。</div>';
+      html += '<button class="btn sm" id="btnUnrevoke">恢复使用</button>';
+    } else {
+      html += '<div class="hint" style="margin-bottom:8px">停用后无法再激活；已激活的设备最迟 6 小时内被锁回验证页。不会删除记录，可随时撤销。</div>';
+      html += '<div class="row"><input type="text" id="reasonInput" placeholder="原因（可选，如：退款）" style="flex:1">';
+      html += '<button class="btn sm danger" id="btnRevoke">停用</button></div>';
+    }
+    html += '</div>';
+
+    $('dBody').innerHTML = html;
+  }
+
+  /* ============================================================
+   * 5. 动作
+   * ============================================================ */
+  function withBusy(promise, okMsg) {
+    if (state.busy) return Promise.resolve();
+    state.busy = true;
+    $('drawer').classList.add('loading');
+    return promise.then(function () {
+      if (okMsg) toast(okMsg, 'ok');
+      return load();
+    }).catch(function (e) {
+      toast(e.message || '操作失败', 'err');
+    }).then(function () {
+      state.busy = false;
+      $('drawer').classList.remove('loading');
+    });
+  }
+
+  function load() {
+    if (!state.provider) return Promise.resolve();
+    return state.provider.list().then(function (d) {
+      state.items = (d.items || []).slice().sort(function (a, b) {
+        var order = { active: 0, expired: 1, revoked: 2, unused: 3 };
+        // 注意：不能用 (order[s] || 9)，active 的权重是 0，会被 || 当成假值算成 9
+        var rank = function (s) {
+          return Object.prototype.hasOwnProperty.call(order, s) ? order[s] : 9;
+        };
+        var d0 = rank(a.status) - rank(b.status);
+        if (d0) return d0;
+        var ad = a.daysLeft === null || a.daysLeft === undefined ? 99999 : a.daysLeft;
+        var bd = b.daysLeft === null || b.daysLeft === undefined ? 99999 : b.daysLeft;
+        if (ad !== bd) return ad - bd;
+        return String(a.hashPrefix).localeCompare(String(b.hashPrefix));
+      });
+      state.summary = d.summary || { total: state.items.length };
+      if (state.selected) {
+        var fresh = state.items.filter(function (i) { return i.hash === state.selected.hash; })[0];
+        state.selected = fresh || null;
+      }
+      renderStats();
+      renderRows();
+      renderDrawer();
+    }).catch(function (e) {
+      toast(e.message || '加载失败', 'err');
+      if (e.status === 401) openSettings();
+    });
+  }
+
+  function openDrawer(hash) {
+    var it = state.items.filter(function (i) { return i.hash === hash; })[0];
+    state.selected = it || null;
+    renderRows();
+    renderDrawer();
+  }
+  function closeDrawer() {
+    state.selected = null;
+    renderRows();
+    renderDrawer();
+  }
+
+  /* ============================================================
+   * 6. 事件绑定
+   * ============================================================ */
+  var drawerBody = $('dBody');
+
+  drawerBody.addEventListener('click', function (ev) {
+    var t = ev.target.closest('button');
+    if (!t || !state.selected) return;
+    var it = state.selected;
+
+    if (t.id === 'btnSaveNote') {
+      var note = $('noteInput').value.trim();
+      withBusy(state.provider.setNote(it.hash, note), '备注已保存');
+      return;
+    }
+    if (t.id === 'btnCustomExt') {
+      var days = prompt('延期天数（正数延长，负数缩短）：', '30');
+      if (days === null) return;
+      var n = Number(days);
+      if (!n || isNaN(n)) { toast('请输入有效天数', 'err'); return; }
+      withBusy(state.provider.extend(it.hash, n), '已' + (n > 0 ? '延期 ' + n : '缩短 ' + Math.abs(n)) + ' 天');
+      return;
+    }
+    if (t.dataset.ext) {
+      var d = Number(t.dataset.ext);
+      withBusy(state.provider.extend(it.hash, d), '已' + (d > 0 ? '延期 ' + d : '缩短 ' + Math.abs(d)) + ' 天');
+      return;
+    }
+    if (t.id === 'btnSetExpiry') {
+      var v = $('expiryInput').value;
+      if (!v) { toast('请选择日期', 'err'); return; }
+      var iso = new Date(v + 'T23:59:59').toISOString();
+      withBusy(state.provider.setExpiry(it.hash, iso), '到期时间已修改');
+      return;
+    }
+    if (t.id === 'btnMakeLifetime') {
+      if (!confirm('改为永久有效？此操作不可自动回退（可再改回具体日期）。')) return;
+      withBusy(state.provider.setExpiry(it.hash, null), '已改为永久有效');
+      return;
+    }
+    if (t.id === 'btnRebind') {
+      var dev = $('deviceInput').value.trim();
+      if (!dev) { toast('请输入新设备 ID', 'err'); return; }
+      withBusy(state.provider.rebind(it.hash, dev), '已换绑到新设备');
+      return;
+    }
+    if (t.id === 'btnRevoke') {
+      var reason = $('reasonInput') ? $('reasonInput').value.trim() : '';
+      if (!confirm('确定停用这张卡？用户将无法继续使用，可随时恢复。')) return;
+      withBusy(state.provider.revoke(it.hash, reason), '已停用');
+      return;
+    }
+    if (t.id === 'btnUnrevoke') {
+      withBusy(state.provider.unrevoke(it.hash), '已恢复使用');
+      return;
+    }
+  });
+
+  $('rows').addEventListener('click', function (ev) {
+    var tr = ev.target.closest('tr');
+    if (!tr) return;
+    openDrawer(tr.dataset.hash);
+  });
+
+  $('btnClose').addEventListener('click', closeDrawer);
+  $('overlay').addEventListener('click', closeDrawer);
+
+  $('q').addEventListener('input', function (e) {
+    state.q = e.target.value;
+    renderRows();
+  });
+  $('fType').addEventListener('change', function (e) {
+    state.type = e.target.value;
+    renderRows();
+  });
+  $('fStatus').addEventListener('change', function (e) {
+    state.status = e.target.value;
+    renderRows();
+  });
+
+  $('btnRefresh').addEventListener('click', function () {
+    load().then(function () {
+      if (state.mode === 'mock') toast('演示数据已重新加载');
+    });
+  });
+
+  function openSettings() {
+    $('apiBase').value = currentBase();
+    $('apiToken').value = currentToken();
+    $('settings').classList.add('show');
+  }
+  $('btnSettings').addEventListener('click', openSettings);
+  $('settings').addEventListener('click', function (ev) {
+    if (ev.target === $('settings')) $('settings').classList.remove('show');
+  });
+
+  $('btnDemo').addEventListener('click', function () {
+    localStorage.setItem(LS.mode, 'mock');
+    localStorage.removeItem(LS.token);
+    localStorage.removeItem(LS.base);
+    $('settings').classList.remove('show');
+    initProvider();
+    load().then(function () { toast('已切换到演示数据'); });
+  });
+
+  $('btnSaveConn').addEventListener('click', function () {
+    var base = $('apiBase').value.trim() || location.origin;
+    var token = $('apiToken').value.trim();
+    if (!token) { toast('请填写管理令牌', 'err'); return; }
+    var btn = $('btnSaveConn');
+    btn.disabled = true;
+    var probe = new HttpProvider(base, token);
+    probe.list().then(function (d) {
+      localStorage.setItem(LS.token, token);
+      localStorage.setItem(LS.base, base);
+      localStorage.setItem(LS.mode, 'http');
+      state.provider = probe;
+      setMode('http');
+      $('settings').classList.remove('show');
+      toast('已连接，共 ' + (d.summary ? d.summary.total : (d.items || []).length) + ' 张卡', 'ok');
+      return load();
+    }).catch(function (e) {
+      toast('连接失败：' + (e.message || '未知错误'), 'err');
+    }).then(function () { btn.disabled = false; });
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') {
+      if ($('settings').classList.contains('show')) $('settings').classList.remove('show');
+      else if (state.selected) closeDrawer();
+      return;
+    }
+    if (ev.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+      ev.preventDefault();
+      $('q').focus();
+    }
+  });
+
+  /* ============================================================
+   * 7. 启动
+   * ============================================================ */
+  initProvider();
+  // 同源部署时默认尝试真实接口：只有存过令牌才会走 http
+  load().then(function () {
+    if (state.mode === 'mock') {
+      toast('当前为演示数据，点「设置」填入管理令牌可接入真实数据', '');
+    }
+  });
+})();
+</script>
+</body>
+</html>
