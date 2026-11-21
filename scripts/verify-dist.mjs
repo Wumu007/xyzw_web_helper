@@ -11,7 +11,7 @@
  * 退出码：0 全部通过；1 存在致命问题（不应部署）
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -114,7 +114,41 @@ if (!existsSync(assetsDir)) {
   ok('dist/assets 目录存在');
 }
 
-// ---------- 6. 关键产物不全时的假存活提示 ----------
+// ---------- 6. 游戏引擎（Token 导入页按需加载，缺了登录会失败） ----------
+// 引擎通过 `?url` 原样输出到 assets，文件名带 hash 无从硬编码，
+// 只能按体积 + 内容特征校验：cocos 提供 window.cc，SDK 提供 window.__require。
+if (!existsSync(assetsDir)) {
+  fail('dist/assets 目录缺失，无法校验游戏引擎产物');
+} else {
+  const bigJs = readdirSync(assetsDir).filter(
+    (f) => f.endsWith('.js') && statSync(join(assetsDir, f)).size > 1000 * 1000,
+  );
+  const hasCocos = bigJs.some((f) => read(join(assetsDir, f)).includes('cocos2d'));
+  const hasSdk = bigJs.some((f) =>
+    read(join(assetsDir, f)).includes('window.__require'),
+  );
+  if (!hasCocos) {
+    fail('产物中找不到 cocos2d 引擎（Token 导入页无法生成登录凭据）');
+  } else if (!hasSdk) {
+    fail('产物中找不到 xh SDK / window.__require（加密模块不可用）');
+  } else {
+    ok('游戏引擎已作为静态资源输出（供 Token 导入页按需加载）');
+  }
+}
+
+// ---------- 7. 缓存策略 ----------
+if (!inDist('_headers')) {
+  warn('dist/_headers 缺失：静态资源会退回 max-age=0，每次打开都要重新校验');
+} else {
+  const h = read(join(dist, '_headers'));
+  if (h.includes('/assets/*') && h.includes('immutable')) {
+    ok('_headers 为带 hash 的产物配置了长缓存');
+  } else {
+    warn('_headers 未给 /assets/* 配 immutable');
+  }
+}
+
+// ---------- 8. 关键产物不全时的假存活提示 ----------
 if (!inDist('access-keys.json') || !inDist('_worker.js')) {
   warn('关键产物不全，Pages 端可能出现「首页正常但功能失灵」的假存活');
 }
