@@ -70,13 +70,39 @@ const DURATIONS_DAYS = {
   lifetime: null,
 };
 
-const locked = ref(true);
+const gateEnabled = ACCESS_KEYS.length > 0;
+
+/**
+ * 首帧同步判断是否该锁住。
+ * 原来 locked 恒为 true、要等 onMounted 才解锁，已激活的用户每次打开
+ * 都会先闪一下门禁卡片再消失，很容易被当成「加载慢 / 又要重新验证」。
+ * 真正的过期清理与提示仍由 onMounted 里的 checkStored 负责。
+ */
+function readStoredLock() {
+  if (!gateEnabled) return false;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return true;
+    const rec = JSON.parse(raw);
+    if (!rec.hash) return true;
+    if (
+      rec.type !== "lifetime" &&
+      rec.expiresAt &&
+      Date.now() > new Date(rec.expiresAt).getTime()
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+const locked = ref(readStoredLock());
 const keyInput = ref("");
 const verifying = ref(false);
 const errorMsg = ref("");
 const message = useMessage();
-
-const gateEnabled = ACCESS_KEYS.length > 0;
 
 async function sha256Hex(text) {
   const data = new TextEncoder().encode(text);
