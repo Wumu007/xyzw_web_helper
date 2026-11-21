@@ -50,9 +50,12 @@
     <div id="app">
       <div class="loading">正在加载应用...</div>
     </div>
+    <!--
+      游戏引擎（cocos2d + xh SDK，合计约 4MB）不再在这里加载。
+      它只在「Token 导入」页需要（调 window.__require("13") 生成登录凭据），
+      由 src/utils/gameEngine.js 在真正用到时按需注入，
+      否则每个打开首页的人都要先下 4MB 死代码。
+    -->
     <script type="module" src="/src/main.js"></script>
-    <script type="module" src="/src/xyzw/cocos2d-js-min.js"></script>
-    <script type="module" src="/src/xyzw/game-defines.js"></script>
-    <script type="module" src="/src/xyzw/index.js"></script>
   </body>
 </html>

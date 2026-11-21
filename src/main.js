@@ -4,6 +4,7 @@ import { createApp } from "vue";
 
 import App from "./App.vue";
 import router from "./router";
+import { ensureGameEngine, isGameEngineReady } from "./utils/gameEngine";
 import "@arco-design/web-vue/dist/arco.css";
 import "virtual:uno.css";
 import "./assets/styles/global.scss";
@@ -16,6 +17,27 @@ const app = createApp(App);
 app.use(createPinia());
 app.use(router);
 app.use(naive);
+
+// Token 导入页依赖游戏引擎里的加密模块（cocos2d + xh SDK，约 4MB）。
+// 进该路由前预加载一次：首次约一两秒，之后走浏览器缓存。
+// 放在路由守卫而不是入口，是为了让首页 / 后台不必为它买单。
+router.beforeEach(async (to) => {
+  const path = String(to.path || "");
+  const wantsEngine =
+    to.name === "TokenImport" || path === "/tokens" || path.startsWith("/tokens/");
+  if (!wantsEngine || isGameEngineReady()) return true;
+
+  document.body.style.cursor = "progress";
+  try {
+    await ensureGameEngine();
+  } catch (err) {
+    // 不阻断导航：组件里会给出「游戏加密模块未加载」的明确提示
+    console.warn("[gameEngine]", err?.message || err);
+  } finally {
+    document.body.style.cursor = "";
+  }
+  return true;
+});
 
 // 全局主题应用：从 localStorage 读取并设置 data-theme 属性
 const applyTheme = () => {

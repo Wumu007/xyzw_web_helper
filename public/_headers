@@ -1,0 +1,30 @@
+# Cloudflare Pages 缓存策略
+# 默认行为是 max-age=0, must-revalidate，等于每次打开页面
+# 都要为每个带 hash 的静态资源额外打一次 RTT 去校验。
+# 带内容 hash 的产物改了名就会变，可以放心一年 immutable。
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# 游戏引擎副本（cocos2d + xh SDK），文件名带 hash 但来源稳定，
+# 给一天并允许 stale-while-revalidate，避免更新后长期拿到旧版。
+/xyzw/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/game/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+# 管理页面是单个 HTML，改动频繁，给 5 分钟即可
+/admin/*
+  Cache-Control: public, max-age=300, must-revalidate
+
+# 卡密清单绝不能被缓存（worker 内部读它做校验）
+/access-keys.json
+  Cache-Control: no-store
+
+# 入口 HTML 不能缓存，否则新版本发布后用户拿不到新的 hash 引用
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
